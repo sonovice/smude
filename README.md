@@ -1,7 +1,7 @@
 # Smude - Sheet Music Dewarping
 ### About
 
-**Smude** is a library dedicated to dewarping/rectifying sheet music images. It is able to turn images like
+**Smude** is a library dedicated to dewarping/rectification of sheet music images. It is able to turn images like
 
 <p align="center">
     <img src="https://github.com/sonovice/smude/raw/master/images/example_input.jpg" height="400px" />
