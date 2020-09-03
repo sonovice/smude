@@ -39,6 +39,7 @@ smude = Smude(use_gpu=False)
 result = smude.process(image)
 imsave('result.png', result)
 ```
+⚠️ **Smude** will download a ~348 MB Deep Learning model on the first run!
 
 ### Side Notes
 
