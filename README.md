@@ -49,4 +49,4 @@ imsave('result.png', result)
 - The dewarping algorithm assumes that the curved page shape is a [General Cylindric Surface](https://en.wikipedia.org/wiki/Cylinder#Cylindrical_surfaces). In practice, these are usually pages that are bound in a book and thus often exhibit a curvature when opened.
 
 ### License
-TBD. No rights given to anyone at this point. People with access to this repository are obligated to use the library solely for testing purposes.
+This repository is under the "Commons Clause" License Condition v1.0 on top of GNU AGPLv3.
