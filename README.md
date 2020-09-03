@@ -6,11 +6,11 @@
 <p align="center">
     <img src="https://github.com/sonovice/smude/raw/master/images/example_input.jpg" height="400px" />
 </p>
-
-into
-
 <p align="center">
-    <img src="https://github.com/sonovice/smude/raw/master/images/example_output.jpg" height="400px" />
+    into
+</p>
+<p align="center">
+    <img src="https://github.com/sonovice/smude/raw/master/images/example_output.jpg" height="400px" style="border:1px solid black" />
 </p>
 
 The actual dewarping algorithm is loosely based on this paper:
@@ -49,4 +49,4 @@ imsave('result.png', result)
 - The dewarping algorithm assumes that the curved page shape is a [General Cylindric Surface](https://en.wikipedia.org/wiki/Cylinder#Cylindrical_surfaces). In practice, these are usually pages that are bound in a book and thus often exhibit a curvature when opened.
 
 ### License
-TBD.
+TBD. No rights given to anyone at this point. People with access to this repository are obligated to use the library solely for testing purposes.
