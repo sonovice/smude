@@ -6,16 +6,17 @@ import urllib.request
 
 import cv2 as cv
 import numpy as np
+import requests
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from skimage.color import gray2rgb
+from tqdm import tqdm
 
 from .binarize import binarize
 from .model import load_model
 from .mrcdi import mrcdi
 from .roi import extract_roi_mask, get_border
-from .utils import ProgressBar
 
 
 class Smude():
@@ -39,7 +40,19 @@ class Smude():
         checkpoint_path = os.path.join(dirname, 'model.ckpt')
         if not os.path.exists(checkpoint_path):
             print('First run. Downloading model...')
-            urllib.request.urlretrieve('https://github.com/sonovice/smude/releases/latest/download/model.ckpt', checkpoint_path, ProgressBar())
+            url = 'https://github.com/sonovice/smude/releases/download/v0.1.0/model.ckpt'
+            response = requests.get(url, stream=True, allow_redirects=True)
+            total_size_in_bytes= int(response.headers.get('content-length', 0))
+            block_size = 1024 #1 Kibibyte
+            progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
+            with open(checkpoint_path, 'wb') as file:
+                for data in response.iter_content(block_size):
+                    progress_bar.update(len(data))
+                    file.write(data)
+            progress_bar.close()
+            if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
+                print("Error: Model could not be downloaded.")
+                exit(1)
 
         self.model = load_model(checkpoint_path)
         if self.use_gpu:

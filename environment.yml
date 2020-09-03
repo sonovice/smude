@@ -15,4 +15,5 @@ dependencies:
   - torchvision=0.7.0
   - typing=3.7.4.3
   - typing_extensions=3.7.4.2
-  - progressbar2=3.38.0
+  - tqdm=4.48.2
+  - requests=2.24.0
