@@ -5,12 +5,7 @@ from typing import Tuple
 import cv2
 import numpy as np
 from scipy import ndimage
-from skimage import measure
-from skimage.exposure import equalize_adapthist
-from skimage.feature import canny
-from skimage.io import imread, imsave
-from skimage.morphology import disk, square
-from skimage.segmentation import felzenszwalb, slic, watershed
+from skimage.morphology import square
 
 
 def get_border(image: np.ndarray) -> Tuple[int, int, int, int]:
@@ -43,7 +38,15 @@ def get_border(image: np.ndarray) -> Tuple[int, int, int, int]:
     return x_start, x_end, y_start, y_end
 
 
-def extract_roi_mask(image: np.ndarray, min_hull_ratio: float = 0.3) -> Tuple[np.ndarray, float]:
+def auto_canny(image, sigma=0):
+    v = np.median(image)
+    lower = int(max(0, (1.0 - sigma) * v))
+    upper = int(min(90, (1.0 + sigma) * v))
+    edged = cv2.Canny(image, lower, upper)
+    return edged
+
+
+def extract_roi_mask(image: np.ndarray, min_hull_ratio: float = 0.4) -> Tuple[np.ndarray, float]:
     """
     Extract region of interest (ROI) for the given image.
 
@@ -67,54 +70,45 @@ def extract_roi_mask(image: np.ndarray, min_hull_ratio: float = 0.3) -> Tuple[np
         If the minimum desired ratio could not be achieved, an error is raised.
     """
     # Scale image to fixed size
-    size = 1000
+    size = 512
     width, height, _ = image.shape
     image_resized = cv2.resize(image, (size, size))
 
-    # Search for edges with canny filter on each channel of HSV image
-    image_hsv = cv2.cvtColor(image_resized, cv2.COLOR_RGB2HSV)
-    image_canny = np.empty_like(image_hsv)
-    for channel in range(3):
-        # Apply adaptive histogram equalization
-        channel_eq = equalize_adapthist(image_hsv[:,:,channel], kernel_size=200)
-        # Apply canny filter
-        channel_canny = canny(channel_eq, sigma=3)
-        image_canny[:,:,channel] = channel_canny
-    
-    # Perform segmentation using the Felzenszwalb-Huttenlocher algorithm
-    # and sort segments by size in descending order
-    image_segmented = felzenszwalb(image_canny, scale=1000, sigma=0.3, min_size=50)
+    image_gray = cv2.cvtColor(image_resized, cv2.COLOR_RGB2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=0.01, tileGridSize=(64, 64))
+    image_eq = clahe.apply(image_gray)
+    image_canny = auto_canny(image_eq.astype(np.uint8))
+    image_canny = cv2.morphologyEx(image_canny, cv2.MORPH_DILATE, kernel=square(2))
+    _, image_segmented = cv2.connectedComponents(image_canny, connectivity=4)
 
     segment_sizes = np.bincount(image_segmented.flatten())
     segments = np.argsort(-segment_sizes)
 
-    # Iterate over segments, starting from largest
-    for s in segments:
+    # Iterate over 5 largest segments, starting from largest
+    for s in segments[:5]:
         # Get segment and fill all holes
         segment = image_segmented == s
         hull = ndimage.binary_fill_holes(segment)
 
+        # Removes areas that are only connected by few pixels to the hull
+        hull_opened = cv2.morphologyEx(hull.astype(np.uint8), cv2.MORPH_OPEN, kernel=square(20))
+
+        # Take center blob
+        _, blobs_segmented = cv2.connectedComponents(hull_opened, connectivity=4)
+        center_blob_label = blobs_segmented[size // 2, size // 2]
+        hull = blobs_segmented == center_blob_label
+
         # Exit if hull_ratio is sufficient
         hull_ratio = np.sum(hull) / (size**2)
-        if hull_ratio >= min_hull_ratio:
-          break
-    
+        if hull_ratio >= min_hull_ratio and (int(np.any(hull[0])) + int(np.any(hull[size-1])) + int(np.any(hull[:,0])) + int(np.any(hull[:,size-1]))) < 4:
+            break
+
     # Raise error if hull_ratio criterion could not be met
     if hull_ratio < min_hull_ratio:
         raise Exception('ROI could not be computed')
 
-    ### Postprocessing
-
-    # Removes areas that are only connected by few pixels to the hull
-    hull_opened = cv2.morphologyEx(hull.astype(np.uint8), cv2.MORPH_OPEN, kernel=disk(20))
-
-    # Take center blob
-    blobs_segmented = measure.label(hull_opened)
-    center_blob_label = blobs_segmented[size // 2, size // 2]
-    mask = blobs_segmented == center_blob_label
-
     # Resize mask back to original image size
-    mask_fullsize = cv2.resize(mask.astype(np.uint8), (height, width))
-    mask_ratio = np.sum(mask) / (size**2)
+    mask_fullsize = cv2.resize(hull.astype(np.uint8), (height, width))
+    mask_ratio = np.sum(hull) / (size**2)
 
     return mask_fullsize, mask_ratio

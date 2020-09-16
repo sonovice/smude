@@ -2,7 +2,6 @@ __author__ = "Simon Waloschek"
 
 import logging
 import os
-import urllib.request
 
 import cv2 as cv
 import numpy as np
