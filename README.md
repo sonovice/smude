@@ -39,7 +39,7 @@ Rectification of the pages of sheet music is divided into several steps:
 5. Spline interpolation for staff lines
 6. Dewarping
 
-The Deep Learning model was trained on thousands of public domain scores downloaded from [musescore.com](https://www.musescore.com), rendered with [Verovio](https://www.verovio.org) and artificially warped using code from [NVlabs/ocrodec](https://github.com/NVlabs/ocrodeg).
+The Deep Learning model was trained on thousands of public domain scores downloaded from [musescore.com](https://www.musescore.com), heavily augmented with plain xml foo, rendered with [Verovio](https://www.verovio.org) and artificially warped using code from [NVlabs/ocrodec](https://github.com/NVlabs/ocrodeg).
 
 The actual dewarping algorithm is loosely based on this paper:
 > Meng, G. et. al. (2012):
