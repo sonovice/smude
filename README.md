@@ -1,6 +1,6 @@
 # Smude - Sheet Music Dewarping ⚠️ _beta_ ⚠️
 
-**Smude** is a library dedicated to binarization and dewarping/rectification of sheet music images:
+**Smude** is a library dedicated to binarization and dewarping/rectification of sheet music images taken with smartphones:
 
 <p align="center">
     <img src="https://github.com/sonovice/smude/raw/master/images/example_input.jpg" width="49%" />
