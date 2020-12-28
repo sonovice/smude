@@ -133,3 +133,7 @@ dmypy.json
 
 # Demo result
 result.png
+
+# IDEs
+.vscode
+.idea

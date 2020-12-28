@@ -653,6 +653,7 @@ def mrcdi(input_img: np.ndarray, barlines_img: np.ndarray, upper_img: np.ndarray
     score : np.ndarray
         Rectified score image.
     """
+    
     h, w, _ = input_img.shape
     min_dim = min(h, w)
     num_longitudes = int(w / min_dim * 20)
@@ -733,9 +734,10 @@ def mrcdi(input_img: np.ndarray, barlines_img: np.ndarray, upper_img: np.ndarray
     orig_h, orig_w = original_img.shape
     cols, rows = generate_mesh(num_latitudes, num_longitudes, longitudes, mu_top, mu_bottom, w, h, orig_w, orig_h, get_latitude)
 
+    return cols, rows
 
-    logging.info('Dewarping image')
-    result = cv.remap(original_img, cols, rows, cv.INTER_CUBIC, None, cv.BORDER_CONSTANT, 255)
+    #logging.info('Dewarping image')
+    #result = cv.remap(original_img, cols, rows, cv.INTER_CUBIC, None, cv.BORDER_CONSTANT, 255)
 
 
     # logging.info('Drawing output')

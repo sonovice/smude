@@ -19,7 +19,7 @@ from .roi import extract_roi_mask, get_border
 
 
 class Smude():
-    def __init__(self, use_gpu: bool = False):
+    def __init__(self, use_gpu: bool = False, binarize_output: bool = True):
         """
         Instantiate new Smude object for sheet music dewarping.
 
@@ -27,12 +27,15 @@ class Smude():
         ----------
         use_gpu : bool, optional
             Flag if GPU should be used, by default False.
+        binarize_output : bool, optional
+            Flag whether the output should be binarized, by default True.
         checkpoint_path : str, optional
             Path to a trained U-Net model, by default the included 'model.ckpt'.
         """
 
         super().__init__()
         self.use_gpu = use_gpu
+        self.binarize_output = binarize_output
 
         # Load Deep Learning model
         dirname = os.path.dirname(__file__)
@@ -104,7 +107,8 @@ class Smude():
         binarized = binarized[x_start:x_end, y_start:y_end]
 
         # Add 5% width border
-        binarized = np.pad(binarized, pad_width=int(binarized.shape[0] * 0.05), mode='constant', constant_values=1)
+        pad_width = int(binarized.shape[0] * 0.05)
+        binarized = np.pad(binarized, pad_width=pad_width, mode='constant', constant_values=1)
 
         binarized_torch = torch.from_numpy(binarized).float()
 
@@ -132,7 +136,7 @@ class Smude():
         logging.info('Dewarping...')
 
         # Dewarp output
-        dewarped = mrcdi(
+        cols, rows = mrcdi(
             input_img = grayscale,
             barlines_img = barlines,
             upper_img = upper,
@@ -141,13 +145,39 @@ class Smude():
             original_img = binarized,
             optimize_f = optimize_f
         )
+        
+        if self.binarize_output:
+            dewarped = cv.remap(binarized, cols, rows, cv.INTER_CUBIC, None, cv.BORDER_CONSTANT, 255)
+            # Remove border
+            x_start, x_end, y_start, y_end = get_border(dewarped)
+            dewarped = dewarped[x_start:x_end, y_start:y_end]
 
-        # Remove border
-        x_start, x_end, y_start, y_end = get_border(dewarped)
-        dewarped = dewarped[x_start:x_end, y_start:y_end]
-
-        # Add 5% min(width, height) border
-        smaller = min(*dewarped.shape)
-        dewarped = np.pad(dewarped, pad_width=int(smaller * 0.05), mode='constant', constant_values=255)
-
+            # Add 5% min(width, height) border
+            smaller = min(*dewarped.shape)
+            dewarped = np.pad(dewarped, pad_width=int(smaller * 0.05), mode='constant', constant_values=255)
+        else:
+            # TODO rework the image manipulation part here
+            # Remove borders
+            image = image[x_start:x_end, y_start:y_end]
+            dewarped = []
+            # Do stuff for each channel individually
+            for c in range(image.shape[2]):
+                # Add border
+                channel = np.pad(image[:, :, c], pad_width=pad_width, mode='constant', constant_values=255)
+                # Dewarp
+                channel = cv.remap(channel, cols, rows, cv.INTER_CUBIC, None, cv.BORDER_CONSTANT, 255)
+                # Remove border again
+                channel = channel[pad_width:-pad_width, pad_width:-pad_width]
+                
+                border_cols, border_rows = np.where(channel < 255)
+                x_start = np.min(border_cols)
+                x_end = np.max(border_cols) + 1
+                y_start = np.min(border_rows)
+                y_end = np.max(border_rows) + 1
+                                
+                channel = channel[x_start:x_end, y_start:y_end]
+                
+                dewarped.append(channel)
+            dewarped = np.stack(dewarped, axis=2)
+            
         return dewarped
