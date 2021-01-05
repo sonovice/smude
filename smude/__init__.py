@@ -2,6 +2,7 @@ __author__ = "Simon Waloschek"
 
 import logging
 import os
+import argparse
 
 import cv2 as cv
 import numpy as np
@@ -10,6 +11,7 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from skimage.color import gray2rgb
+from skimage.io import imread, imsave
 from tqdm import tqdm
 
 from .binarize import binarize
@@ -181,3 +183,17 @@ class Smude():
             dewarped = np.stack(dewarped, axis=2)
             
         return dewarped
+
+def main():
+    parser = argparse.ArgumentParser(description='Dewarp and binarize sheet music images.')
+    parser.add_argument('infile', help='Specify the input image')
+    parser.add_argument('-o', '--outfile', help='Specify the output image (default: result.png)', default='result.png')
+    parser.add_argument('--no-binarization', help='Deactivate binarization', action='store_false')
+    parser.add_argument('--use-gpu', help='use GPU', action='store_true')
+    args = parser.parse_args()
+
+    smude = Smude(use_gpu=args.use_gpu, binarize_output=args.no_binarization)
+
+    image = imread(args.infile)
+    result = smude.process(image)
+    imsave(args.outfile, result)
