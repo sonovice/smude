@@ -29,6 +29,23 @@ $ python3 setup.py install
 ### Via the command line
 Installing the package adds a command-line interface called `smude`. `smude -h` provides the instructions.
 
+```bash
+$ smude -h
+usage: smude [-h] [-o OUTFILE] [--no-binarization] [--use-gpu] infile
+
+Dewarp and binarize sheet music images.
+
+positional arguments:
+  infile                Specify the input image
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -o OUTFILE, --outfile OUTFILE
+                        Specify the output image (default: result.png)
+  --no-binarization     Deactivate binarization
+  --use-gpu             use GPU
+```
+
 ### Using the Library
 See `example.py` for a simple usage example:
 ```python
