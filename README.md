@@ -7,9 +7,9 @@
     <img src="https://github.com/sonovice/smude/raw/master/images/example_output.jpg" width="49%" style="border:1px solid black" />
 </p>
 
-
-## Quick Start
-Clone this repository and make sure that all dependencies listed in `environment.yml` are installed, e.g. using conda:
+## Installation
+### Using Conda
+Clone this repository and :
 ```bash
 $ git clone https://github.com/sonovice/smude.git
 $ cd smude
@@ -17,6 +17,19 @@ $ conda env create -f environment.yml
 $ conda activate smude
 ```
 
+### Using Python
+Clone this repository and install the package using the setup.py:
+```bash
+$ git clone https://github.com/sonovice/smude.git
+$ cd smude
+$ python3 setup.py install
+```
+
+## Usage
+### Via the command line
+Installing the package adds a command-line interface called `smude`. `smude -h` provides the instructions.
+
+### Using the Library
 See `example.py` for a simple usage example:
 ```python
 from skimage.io import imread, imsave
