@@ -19,10 +19,16 @@ setup(
     python_requires='>=3.8.5',
 
     install_requires=[
-        'scikit-image>=0.18.1',
-        'opencv-contrib-python>=4.5.1.48',
-        'requests>=2.24.0',
-        'pytorch-lightning>=1.1.2',
-        'torchvision>=0.8.2',
+        'numpy==1.19.1',
+        'torch==1.6.0',
+        'pytorch-lightning==0.9.0',
+        'scikit-image==0.17.2',
+        'scipy==1.5.2',
+        'torchvision==0.7.0',
+        'typing==3.7.4.3',
+        'typing_extensions==3.7.4.2',
+        'tqdm==4.48.2',
+        'requests==2.24.0',
+        'opencv-contrib-python==4.4.0.42'
     ],
 )
