@@ -9,22 +9,26 @@
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.10+
 - ~348 MB disk space for the Deep Learning model (downloaded on first run)
 
 ## Installation
 
-### Using uv (recommended)
-
-[uv](https://docs.astral.sh/uv/) is a fast Python package manager. Install it first, then:
+### Using pip (recommended)
 
 ```bash
-git clone https://github.com/sonovice/smude.git
-cd smude
-uv sync
+pip install smude
 ```
 
-### Using pip
+### Using uv
+
+[uv](https://docs.astral.sh/uv/) is a fast Python package manager:
+
+```bash
+uv pip install smude
+```
+
+### From source
 
 ```bash
 git clone https://github.com/sonovice/smude.git
@@ -39,10 +43,6 @@ pip install .
 Installing the package adds a command-line interface called `smude`:
 
 ```bash
-# With uv
-uv run smude input.jpg -o output.png
-
-# With pip installation
 smude input.jpg -o output.png
 ```
 

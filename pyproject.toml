@@ -7,22 +7,54 @@ name = "smude"
 version = "0.2.1"
 description = "Sheet Music Dewarping - Binarization and rectification of sheet music images"
 readme = "README.md"
-requires-python = ">=3.12"
+license = "LicenseRef-Commons-Clause-AGPL-3.0"
+requires-python = ">=3.10"
 authors = [
     { name = "Simon Waloschek" },
 ]
-dependencies = [
-    "numpy>=2.4.0",
-    "torch>=2.9.1",
-    "pytorch-lightning>=2.6.0",
-    "scikit-image>=0.26.0",
-    "scipy>=1.16.3",
-    "torchvision>=0.24.1",
-    "typing-extensions>=4.15.0",
-    "tqdm>=4.67.1",
-    "requests>=2.32.5",
-    "opencv-contrib-python>=4.11.0",
+keywords = [
+    "sheet music",
+    "dewarping",
+    "binarization",
+    "image processing",
+    "music",
+    "ocr",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "torch>=2.0.0",
+    "pytorch-lightning>=2.0.0",
+    "scikit-image>=0.21.0",
+    "scipy>=1.10.0",
+    "torchvision>=0.15.0",
+    "typing-extensions>=4.5.0",
+    "tqdm>=4.65.0",
+    "requests>=2.28.0",
+    "opencv-contrib-python>=4.7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/sonovice/smude"
+Repository = "https://github.com/sonovice/smude"
+Issues = "https://github.com/sonovice/smude/issues"
 
 [project.scripts]
 smude = "smude.cli:main"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["smude/model.ckpt", "images/", "result.png"]
+
+[tool.hatch.build.targets.wheel]
+exclude = ["smude/model.ckpt"]
