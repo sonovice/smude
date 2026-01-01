@@ -28,7 +28,7 @@ from .utils import *
 def _fast_trapz_integrate(func: Callable, a: float, b: float, n: int = 100) -> float:
     """
     Fast trapezoidal integration as a replacement for scipy.integrate.quad.
-    
+
     Parameters
     ----------
     func : Callable
@@ -39,7 +39,7 @@ def _fast_trapz_integrate(func: Callable, a: float, b: float, n: int = 100) -> f
         Upper bound.
     n : int
         Number of sample points for integration.
-    
+
     Returns
     -------
     float
@@ -51,13 +51,17 @@ def _fast_trapz_integrate(func: Callable, a: float, b: float, n: int = 100) -> f
     for i, ti in enumerate(t):
         y[i] = func(ti)
     # Use trapezoid for numpy 2.0+, fall back to trapz for older versions
-    if hasattr(np, 'trapezoid'):
+    if hasattr(np, "trapezoid"):
         return np.trapezoid(y, t)
     else:
         return np.trapz(y, t)
 
 
-def get_outer_barlines(barline_img: np.ndarray) -> Tuple[Callable[[float], float], Callable[[float], float]]:
+def get_outer_barlines(
+    barline_img: np.ndarray,
+    approx_left: Optional[float] = None,
+    approx_right: Optional[float] = None,
+) -> Tuple[Callable[[float], float], Callable[[float], float]]:
     """
     Return the outer barlines as lines each defined by slope and one point.
 
@@ -65,6 +69,12 @@ def get_outer_barlines(barline_img: np.ndarray) -> Tuple[Callable[[float], float
     ----------
     barline_img : np.ndarray
         Grayscale barline image.
+    approx_left : float, optional
+        Approximate x-coordinate of the left barline. If provided, searches for
+        the closest Hough peak to this position.
+    approx_right : float, optional
+        Approximate x-coordinate of the right barline. If provided, searches for
+        the closest Hough peak to this position.
 
     Returns
     -------
@@ -84,23 +94,55 @@ def get_outer_barlines(barline_img: np.ndarray) -> Tuple[Callable[[float], float
     origin = np.array((0, barline_img.shape[1]))
 
     # Leftmost vertical line
-    l_idx = np.argmin(peaks[2])
-    _, angle, dist = peaks[:, l_idx]
-    y1, y2 = (dist - origin * np.cos(angle)) / np.sin(angle)
-    left = line(x1=origin[0], x2=origin[1], y1=y1, y2=y2)
-
+    if approx_left is not None:
+        l_idx = np.argmin(np.abs(peaks[2] - approx_left))
+        dist_diff = np.abs(peaks[2][l_idx] - approx_left)
+        if dist_diff > 50:
+            logging.info(
+                f"Left barline not found near {approx_left} (closest {peaks[2][l_idx]}). Using vertical line at {approx_left}."
+            )
+            # Create vertical line at approx_left (slight x offset to avoid division by zero)
+            left = line(
+                x1=approx_left, x2=approx_left + 0.001, y1=0, y2=barline_img.shape[0]
+            )
+        else:
+            _, angle, dist = peaks[:, l_idx]
+            y1, y2 = (dist - origin * np.cos(angle)) / np.sin(angle)
+            left = line(x1=origin[0], x2=origin[1], y1=y1, y2=y2)
+    else:
+        l_idx = np.argmin(peaks[2])
+        _, angle, dist = peaks[:, l_idx]
+        y1, y2 = (dist - origin * np.cos(angle)) / np.sin(angle)
+        left = line(x1=origin[0], x2=origin[1], y1=y1, y2=y2)
 
     # Rightmost vertical line
-    r_idx = np.argmax(peaks[2])
-    _, angle, dist = peaks[:, r_idx]
-    y1, y2 = (dist - origin * np.cos(angle)) / np.sin(angle)
-    right = line(x1=origin[0], x2=origin[1], y1=y1, y2=y2)
-
+    if approx_right is not None:
+        r_idx = np.argmin(np.abs(peaks[2] - approx_right))
+        dist_diff = np.abs(peaks[2][r_idx] - approx_right)
+        if dist_diff > 50:
+            logging.info(
+                f"Right barline not found near {approx_right} (closest {peaks[2][r_idx]}). Using vertical line at {approx_right}."
+            )
+            # Create vertical line at approx_right (slight x offset to avoid division by zero)
+            right = line(
+                x1=approx_right, x2=approx_right + 0.001, y1=0, y2=barline_img.shape[0]
+            )
+        else:
+            _, angle, dist = peaks[:, r_idx]
+            y1, y2 = (dist - origin * np.cos(angle)) / np.sin(angle)
+            right = line(x1=origin[0], x2=origin[1], y1=y1, y2=y2)
+    else:
+        r_idx = np.argmax(peaks[2])
+        _, angle, dist = peaks[:, r_idx]
+        y1, y2 = (dist - origin * np.cos(angle)) / np.sin(angle)
+        right = line(x1=origin[0], x2=origin[1], y1=y1, y2=y2)
 
     return left, right
 
 
-def get_stafflines(upper_img: np.ndarray, lower_img: np.ndarray, step_size: int) -> List[UnivariateSpline]:
+def get_stafflines(
+    upper_img: np.ndarray, lower_img: np.ndarray, step_size: int
+) -> List[UnivariateSpline]:
     """
     Return the top and bottom stafflines from images and return the as
     cubic splines.
@@ -123,7 +165,7 @@ def get_stafflines(upper_img: np.ndarray, lower_img: np.ndarray, step_size: int)
 
     splines = []
     morph_kernel = np.ones((25, 25), dtype=np.uint8)
-    
+
     for image in [upper_img, lower_img]:
         # Morphological operation to close potential gaps
         image_closed = cv.morphologyEx(image, cv.MORPH_CLOSE, morph_kernel)
@@ -136,13 +178,15 @@ def get_stafflines(upper_img: np.ndarray, lower_img: np.ndarray, step_size: int)
             line_pixels = (labels == l).astype(np.uint8) * 255
 
             # Ensure that the staff line has 1px thickness using OpenCV thinning (faster than skimage skeletonize)
-            line_pixels = cv.ximgproc.thinning(line_pixels, thinningType=cv.ximgproc.THINNING_ZHANGSUEN)
+            line_pixels = cv.ximgproc.thinning(
+                line_pixels, thinningType=cv.ximgproc.THINNING_ZHANGSUEN
+            )
 
             y, x = np.nonzero(line_pixels)
-            
+
             if len(x) == 0:
                 continue
-            
+
             # Remove duplicates and sort
             x, idx = np.unique(x, return_index=True)
             y = y[idx]
@@ -166,12 +210,19 @@ def get_stafflines(upper_img: np.ndarray, lower_img: np.ndarray, step_size: int)
             splines.append(spline)
 
     # Sort splines from top to bottom
-    splines.sort(key=lambda i : i(i.get_knots()[0]))
+    splines.sort(key=lambda i: i(i.get_knots()[0]))
 
     return splines
 
 
-def get_top_bottom_stafflines(stafflines: List[UnivariateSpline], left: Callable[[float], float], right: Callable[[float], float], max_dist: float = 5) -> Tuple[Tuple[UnivariateSpline, float, float], Tuple[UnivariateSpline, float, float]]:
+def get_top_bottom_stafflines(
+    stafflines: List[UnivariateSpline],
+    left: Callable[[float], float],
+    right: Callable[[float], float],
+    max_dist: float = 5,
+) -> Tuple[
+    Tuple[UnivariateSpline, float, float], Tuple[UnivariateSpline, float, float]
+]:
     """
     Return the topmost and bottommost 'complete' staff lines. 'Complete' means
     that the endings of the staff lines should be very close to the given left
@@ -227,16 +278,22 @@ def get_top_bottom_stafflines(stafflines: List[UnivariateSpline], left: Callable
         success = True
 
     if not success:
-        raise ValueError('Staff lines could not be detected!')
+        raise ValueError("Staff lines could not be detected!")
 
     return top, bottom
 
 
-
-def cost_function(v_x: float, v_y: float, f: float, top: Tuple[UnivariateSpline, float, float], bottom: Tuple[UnivariateSpline, float, float], num_samples: int = 10) -> float:
+def cost_function(
+    v_x: float,
+    v_y: float,
+    f: float,
+    top: Tuple[UnivariateSpline, float, float],
+    bottom: Tuple[UnivariateSpline, float, float],
+    num_samples: int = 10,
+) -> float:
     """
     Compute the costs for a given vanishing point and the focal distance. Used for optimization.
-    
+
     Vectorized implementation for better performance.
 
     Parameters
@@ -270,55 +327,57 @@ def cost_function(v_x: float, v_y: float, f: float, top: Tuple[UnivariateSpline,
     # Pre-compute x_top values and corresponding y_top values
     x_top_arr = np.linspace(top_left, top_right, num_samples)
     y_top_arr = spline_top(x_top_arr)
-    
+
     # Compute slopes for longitudes from vanishing point to top spline points
     # Longitude: y = m * (x - v_x) + v_y where m = (y_top - v_y) / (x_top - v_x)
     dx = x_top_arr - v_x
     dy = y_top_arr - v_y
     lon_slopes = dy / dx
     lon_intercepts = v_y - lon_slopes * v_x
-    
+
     # Find intersections with bottom spline using vectorized Newton-Raphson
     x0 = np.linspace(bottom_left, bottom_right, num_samples)
     x_bottom_arr, y_bottom_arr = _find_spline_line_intersection_batch(
         spline_bottom, lon_slopes, lon_intercepts, x0
     )
-    
+
     # Get derivatives at sample points
     m_top_arr = spline_top(x_top_arr, 1)
     m_bottom_arr = spline_bottom(x_bottom_arr, 1)
-    
+
     # Compute tangent intersections analytically (line-line intersection)
     # Tangent at top: y = m_top * (x - x_top) + y_top
     # Tangent at bottom: y = m_bottom * (x - x_bottom) + y_bottom
     # Intersection: x = (m_top * x_top - m_bottom * x_bottom - y_top + y_bottom) / (m_top - m_bottom)
-    
+
     dm = m_top_arr - m_bottom_arr
     # Avoid division by zero for parallel tangents
     dm = np.where(np.abs(dm) < 1e-10, 1e-10, dm)
-    
-    P_x = (m_top_arr * x_top_arr - m_bottom_arr * x_bottom_arr - y_top_arr + y_bottom_arr) / dm
+
+    P_x = (
+        m_top_arr * x_top_arr - m_bottom_arr * x_bottom_arr - y_top_arr + y_bottom_arr
+    ) / dm
     P_y = m_top_arr * (P_x - x_top_arr) + y_top_arr
-    
+
     # Stack P coordinates
     P = np.column_stack([P_x, P_y, np.full(num_samples, f)])
     p = P[:, :2]
-    
+
     # Vectorized E_c computation
     length_p = np.linalg.norm(p, axis=1)
-    
+
     # For m_top
     l_top = np.column_stack([np.ones(num_samples), m_top_arr])
     length_l_top = np.linalg.norm(l_top, axis=1)
     cos_P_l_top = np.abs(np.sum(p * l_top, axis=1) / (length_p * length_l_top))
-    
+
     # For m_bottom
     l_bottom = np.column_stack([np.ones(num_samples), m_bottom_arr])
     length_l_bottom = np.linalg.norm(l_bottom, axis=1)
     cos_P_l_bottom = np.abs(np.sum(p * l_bottom, axis=1) / (length_p * length_l_bottom))
-    
+
     E_c = (np.sum(cos_P_l_top) + np.sum(cos_P_l_bottom)) / 2
-    
+
     # Vectorized E_o computation
     length_P = np.linalg.norm(P, axis=1)
     cos_P_V = np.abs(np.dot(P, V) / (length_P * length_V))
@@ -327,7 +386,13 @@ def cost_function(v_x: float, v_y: float, f: float, top: Tuple[UnivariateSpline,
     return E_c + 0.1 * E_o
 
 
-def estimate_focal_length(v_x: float, v_y: float, top: Tuple[UnivariateSpline, float, float], bottom: Tuple[UnivariateSpline, float, float], f: float = 3760) -> float:
+def estimate_focal_length(
+    v_x: float,
+    v_y: float,
+    top: Tuple[UnivariateSpline, float, float],
+    bottom: Tuple[UnivariateSpline, float, float],
+    f: float = 3760,
+) -> float:
     """
     Estimate the focal length for a given vanishing point and a pair of staff
     lines.
@@ -354,21 +419,27 @@ def estimate_focal_length(v_x: float, v_y: float, top: Tuple[UnivariateSpline, f
     """
     # Cyclic coordinate descent until convergence
     counter = 1
-    while(True):
+    while True:
         old_f = f
-        f = minimize(lambda f, v_x=v_x, v_y=v_y: cost_function(v_x, v_y, f, top, bottom), f).x[0]
+        f = minimize(
+            lambda f, v_x=v_x, v_y=v_y: cost_function(v_x, v_y, f, top, bottom), f
+        ).x[0]
 
         old_v_x = v_x
-        v_x = minimize(lambda v_x, v_y=v_y, f=f: cost_function(v_x, v_y, f, top, bottom), v_x).x[0]
+        v_x = minimize(
+            lambda v_x, v_y=v_y, f=f: cost_function(v_x, v_y, f, top, bottom), v_x
+        ).x[0]
 
         old_v_y = v_y
-        v_y = minimize(lambda v_y, v_x=v_x, f=f: cost_function(v_x, v_y, f, top, bottom), v_y).x[0]
+        v_y = minimize(
+            lambda v_y, v_x=v_x, f=f: cost_function(v_x, v_y, f, top, bottom), v_y
+        ).x[0]
 
-        logging.debug(f'Iteration {counter}')
-        logging.debug(f'x: {v_x}')
-        logging.debug(f'y: {v_y}')
-        logging.debug(f'f: {f}')
-        logging.debug(f'-- {cost_function(v_x, v_y, f, top, bottom)}')
+        logging.debug(f"Iteration {counter}")
+        logging.debug(f"x: {v_x}")
+        logging.debug(f"y: {v_y}")
+        logging.debug(f"f: {f}")
+        logging.debug(f"-- {cost_function(v_x, v_y, f, top, bottom)}")
 
         counter += 1
 
@@ -380,7 +451,7 @@ def estimate_focal_length(v_x: float, v_y: float, top: Tuple[UnivariateSpline, f
 
 class LatitudeCache:
     """Cache for latitude splines to avoid redundant computation."""
-    
+
     def __init__(self, v_x: float, v_y: float, top: Derivable, bottom: Derivable):
         self.v_x = v_x
         self.v_y = v_y
@@ -388,53 +459,55 @@ class LatitudeCache:
         self.bottom = bottom
         self._cache = {}
         self._parametric_cache = {}
-        
+
         # Pre-compute sampling points for faster spline creation
         n_samples = 30
         self._t_samples = np.linspace(0, 1, n_samples)
-        
+
         # Pre-compute bottom and top values at sample points - avoid list comprehension
         self._bottom_samples = np.empty((n_samples, 2))
         self._top_samples = np.empty((n_samples, 2))
         for i, t in enumerate(self._t_samples):
             self._bottom_samples[i] = bottom(t)
             self._top_samples[i] = top(t)
-        
+
         # Pre-compute distances from bottom to vanishing point
         self._dist_bottom_v = np.sqrt(
-            (self._bottom_samples[:, 0] - v_x) ** 2 + 
-            (self._bottom_samples[:, 1] - v_y) ** 2
+            (self._bottom_samples[:, 0] - v_x) ** 2
+            + (self._bottom_samples[:, 1] - v_y) ** 2
         )
-        
+
         # Pre-compute distances from bottom to top
         self._dist_bottom_top = np.sqrt(
-            (self._bottom_samples[:, 0] - self._top_samples[:, 0]) ** 2 + 
-            (self._bottom_samples[:, 1] - self._top_samples[:, 1]) ** 2
+            (self._bottom_samples[:, 0] - self._top_samples[:, 0]) ** 2
+            + (self._bottom_samples[:, 1] - self._top_samples[:, 1]) ** 2
         )
-        
+
         # Pre-compute lambda for faster latitude computation
         self._lambda = self._dist_bottom_v / self._dist_bottom_top
-    
+
     def _compute_latitude_points(self, mu: float) -> Tuple[np.ndarray, np.ndarray]:
         """Compute latitude points for a given mu value."""
         # Use pre-computed lambda
         alpha = (mu * self._lambda) / (mu + self._lambda - 1)
-        
+
         # Vectorized computation of all points
-        points = (1 - alpha[:, None]) * self._bottom_samples + alpha[:, None] * self._top_samples
+        points = (1 - alpha[:, None]) * self._bottom_samples + alpha[
+            :, None
+        ] * self._top_samples
         return points[:, 0], points[:, 1]
-    
+
     def get_latitude(self, mu: float) -> UnivariateSpline:
         """Get cached or compute latitude spline."""
         # Handle numpy arrays from fsolve/minimize
-        if hasattr(mu, '__len__'):
+        if hasattr(mu, "__len__"):
             mu = float(mu[0]) if len(mu) == 1 else float(mu)
         else:
             mu = float(mu)
-        
+
         # Round mu to avoid floating point key issues
         mu_key = round(mu, 6)
-        
+
         if mu_key not in self._cache:
             x_sampled, y_sampled = self._compute_latitude_points(mu)
             # Ensure x is monotonically increasing by sorting
@@ -445,27 +518,29 @@ class LatitudeCache:
             x_sampled, unique_idx = np.unique(x_sampled, return_index=True)
             y_sampled = y_sampled[unique_idx]
             self._cache[mu_key] = UnivariateSpline(x_sampled, y_sampled, k=3, s=1)
-        
+
         return self._cache[mu_key]
-    
+
     def get_latitude_parametric(self, mu: float) -> Derivable:
         """Get cached or compute parametric latitude spline."""
         # Handle numpy arrays from fsolve/minimize
-        if hasattr(mu, '__len__'):
+        if hasattr(mu, "__len__"):
             mu = float(mu[0]) if len(mu) == 1 else float(mu)
         else:
             mu = float(mu)
-            
+
         mu_key = round(mu, 6)
-        
+
         if mu_key not in self._parametric_cache:
             latitude = self.get_latitude(mu)
             self._parametric_cache[mu_key] = to_parametric_spline(latitude)
-        
+
         return self._parametric_cache[mu_key]
 
 
-def _get_latitude_parmetric(v_x: float, v_y: float, top: Derivable, bottom: Derivable, mu: float) -> Derivable:
+def _get_latitude_parmetric(
+    v_x: float, v_y: float, top: Derivable, bottom: Derivable, mu: float
+) -> Derivable:
     """
     Return parametric spline representing a latitude defined by parameter 'mu'.
 
@@ -490,30 +565,37 @@ def _get_latitude_parmetric(v_x: float, v_y: float, top: Derivable, bottom: Deri
     """
     n_samples = 30
     t_samples = np.linspace(0, 1, n_samples)
-    
+
     # Pre-allocate arrays instead of list comprehension
     bottom_pts = np.empty((n_samples, 2))
     top_pts = np.empty((n_samples, 2))
     for i, t in enumerate(t_samples):
         bottom_pts[i] = bottom(t)
         top_pts[i] = top(t)
-    
-    dist_bottom_v = np.sqrt((bottom_pts[:, 0] - v_x) ** 2 + (bottom_pts[:, 1] - v_y) ** 2)
-    dist_bottom_top = np.sqrt((bottom_pts[:, 0] - top_pts[:, 0]) ** 2 + (bottom_pts[:, 1] - top_pts[:, 1]) ** 2)
-    
+
+    dist_bottom_v = np.sqrt(
+        (bottom_pts[:, 0] - v_x) ** 2 + (bottom_pts[:, 1] - v_y) ** 2
+    )
+    dist_bottom_top = np.sqrt(
+        (bottom_pts[:, 0] - top_pts[:, 0]) ** 2
+        + (bottom_pts[:, 1] - top_pts[:, 1]) ** 2
+    )
+
     lambd = dist_bottom_v / dist_bottom_top
     alpha = (mu * lambd) / (mu + lambd - 1)
-    
+
     points = (1 - alpha[:, None]) * bottom_pts + alpha[:, None] * top_pts
     x_sampled, y_sampled = points[:, 0], points[:, 1]
-    
+
     latitude = UnivariateSpline(x_sampled, y_sampled, k=3, s=1)
     latitude_parametric = to_parametric_spline(latitude)
 
     return latitude_parametric
 
 
-def _get_latitude(v_x: float, v_y: float, top: Derivable, bottom: Derivable, mu: float) -> UnivariateSpline:
+def _get_latitude(
+    v_x: float, v_y: float, top: Derivable, bottom: Derivable, mu: float
+) -> UnivariateSpline:
     """
     Return spline representing a latitude defined by parameter 'mu'.
 
@@ -538,20 +620,25 @@ def _get_latitude(v_x: float, v_y: float, top: Derivable, bottom: Derivable, mu:
     """
     n_samples = 30
     t_samples = np.linspace(0, 1, n_samples)
-    
+
     # Pre-allocate arrays instead of list comprehension
     bottom_pts = np.empty((n_samples, 2))
     top_pts = np.empty((n_samples, 2))
     for i, t in enumerate(t_samples):
         bottom_pts[i] = bottom(t)
         top_pts[i] = top(t)
-    
-    dist_bottom_v = np.sqrt((bottom_pts[:, 0] - v_x) ** 2 + (bottom_pts[:, 1] - v_y) ** 2)
-    dist_bottom_top = np.sqrt((bottom_pts[:, 0] - top_pts[:, 0]) ** 2 + (bottom_pts[:, 1] - top_pts[:, 1]) ** 2)
-    
+
+    dist_bottom_v = np.sqrt(
+        (bottom_pts[:, 0] - v_x) ** 2 + (bottom_pts[:, 1] - v_y) ** 2
+    )
+    dist_bottom_top = np.sqrt(
+        (bottom_pts[:, 0] - top_pts[:, 0]) ** 2
+        + (bottom_pts[:, 1] - top_pts[:, 1]) ** 2
+    )
+
     lambd = dist_bottom_v / dist_bottom_top
     alpha = (mu * lambd) / (mu + lambd - 1)
-    
+
     points = (1 - alpha[:, None]) * bottom_pts + alpha[:, None] * top_pts
     x_sampled, y_sampled = points[:, 0], points[:, 1]
 
@@ -560,7 +647,9 @@ def _get_latitude(v_x: float, v_y: float, top: Derivable, bottom: Derivable, mu:
     return latitude
 
 
-def get_longitudes(v_x: float, v_y: float, f: float, C: Derivable, num: int) -> Tuple[List[Callable[[float], float]], Derivable]:
+def get_longitudes(
+    v_x: float, v_y: float, f: float, C: Derivable, num: int
+) -> Tuple[List[Callable[[float], float]], Derivable]:
     """
     Return longitudes as a list of line functions.
 
@@ -594,9 +683,9 @@ def get_longitudes(v_x: float, v_y: float, f: float, C: Derivable, num: int) -> 
     C_vals = np.empty((n_int, 2))
     for i, t in enumerate(t_int):
         C_vals[i] = C(t)
-    
+
     # Use trapezoidal integration directly on pre-computed values
-    if hasattr(np, 'trapezoid'):
+    if hasattr(np, "trapezoid"):
         x_0 = np.trapezoid(C_vals[:, 0], t_int)
         y_0 = np.trapezoid(C_vals[:, 1], t_int)
     else:
@@ -608,25 +697,33 @@ def get_longitudes(v_x: float, v_y: float, f: float, C: Derivable, num: int) -> 
     t_2 = y_0 / norm
     t_3 = f / norm
 
-    A = np.array([
-        [1, -t_1 / t_3 * math.sin(theta)],
-        [0, math.cos(theta) - t_2 / t_3 * math.sin(theta)]
-    ])
+    A = np.array(
+        [
+            [1, -t_1 / t_3 * math.sin(theta)],
+            [0, math.cos(theta) - t_2 / t_3 * math.sin(theta)],
+        ]
+    )
 
-    A_inv = np.array([
-        [1, (t_1 * math.sin(theta)) / (t_3 * math.cos(theta) - t_2 * math.sin(theta))],
-        [0, t_3 / (t_3 * math.cos(theta) - t_2 * math.sin(theta))]
-    ])
+    A_inv = np.array(
+        [
+            [
+                1,
+                (t_1 * math.sin(theta))
+                / (t_3 * math.cos(theta) - t_2 * math.sin(theta)),
+            ],
+            [0, t_3 / (t_3 * math.cos(theta) - t_2 * math.sin(theta))],
+        ]
+    )
 
     # Sample values and approximate new spline - use pre-computed C values
     # Apply A_inv transformation vectorized
     D_vals = np.dot(A_inv, C_vals.T).T
     x_sampled, y_sampled = D_vals[:, 0], D_vals[:, 1]
-    
+
     D = UnivariateSpline(x_sampled, y_sampled, k=3, s=1)
     D_parametric = to_parametric_spline(D)
     t_sample_points = sample_spline_arc(D_parametric, num)
-    
+
     # Pre-allocate and avoid list comprehension
     D_sampled = np.empty((num, 2))
     for i, t in enumerate(t_sample_points):
@@ -639,7 +736,9 @@ def get_longitudes(v_x: float, v_y: float, f: float, C: Derivable, num: int) -> 
     return longitudes, D_parametric
 
 
-def expand_lr_boundaries(v_x: float, v_y: float, w: float, h: float) -> Tuple[Callable[[float], float], Callable[[float], float]]:
+def expand_lr_boundaries(
+    v_x: float, v_y: float, w: float, h: float
+) -> Tuple[Callable[[float], float], Callable[[float], float]]:
     """
     Expand left/right page boundaries to cover the entire page.
 
@@ -664,30 +763,39 @@ def expand_lr_boundaries(v_x: float, v_y: float, w: float, h: float) -> Tuple[Ca
 
     if v_x < 0:
         if v_y < 0:
-            left  = line(x1=v_x, y1=v_y, x2=0, y2=0)
+            left = line(x1=v_x, y1=v_y, x2=0, y2=0)
             right = line(x1=v_x, y1=v_y, x2=w, y2=h)
         else:
-            left  = line(x1=v_x, y1=v_y, x2=0, y2=h)
+            left = line(x1=v_x, y1=v_y, x2=0, y2=h)
             right = line(x1=v_x, y1=v_y, x2=w, y2=0)
     elif v_x < w:
         if v_y < 0:
-            left  = line(x1=v_x, y1=v_y, x2=0, y2=h)
+            left = line(x1=v_x, y1=v_y, x2=0, y2=h)
             right = line(x1=v_x, y1=v_y, x2=w, y2=h)
         else:
-            left  = line(x1=v_x, y1=v_y, x2=0, y2=0)
+            left = line(x1=v_x, y1=v_y, x2=0, y2=0)
             right = line(x1=v_x, y1=v_y, x2=w, y2=0)
     else:
         if v_y < 0:
-            left  = line(x1=v_x, y1=v_y, x2=0, y2=h)
+            left = line(x1=v_x, y1=v_y, x2=0, y2=h)
             right = line(x1=v_x, y1=v_y, x2=w, y2=0)
         else:
-            left  = line(x1=v_x, y1=v_y, x2=0, y2=0)
-            right = line(x1=v_x, y1=v_y, x2=w, y2=h)    
+            left = line(x1=v_x, y1=v_y, x2=0, y2=0)
+            right = line(x1=v_x, y1=v_y, x2=w, y2=h)
 
     return left, right
 
 
-def compute_aspect_ratio(v_x: float, v_y: float, f: float, h: int, w: int, top: Derivable, bottom: Derivable, D: Derivable) -> float:
+def compute_aspect_ratio(
+    v_x: float,
+    v_y: float,
+    f: float,
+    h: int,
+    w: int,
+    top: Derivable,
+    bottom: Derivable,
+    D: Derivable,
+) -> float:
     """
     Compute the aspect ratio of the page.
 
@@ -721,44 +829,46 @@ def compute_aspect_ratio(v_x: float, v_y: float, f: float, h: int, w: int, top: 
     top_075, top_075_d = top(0.75), top(0.75, 1)
     bottom_025, bottom_025_d = bottom(0.25), bottom(0.25, 1)
     bottom_075, bottom_075_d = bottom(0.75), bottom(0.75, 1)
-    
+
     m_top_025 = top_025_d[1]
     m_bottom_025 = bottom_025_d[1]
     tangent_top_025 = line(m=m_top_025, x1=top_025[0], y1=top_025[1])
     tangent_bottom_025 = line(m=m_bottom_025, x1=bottom_025[0], y1=bottom_025[1])
     point_025 = line_intersection(tangent_top_025, tangent_bottom_025)
-    
+
     m_top_075 = top_075_d[1]
     m_bottom_075 = bottom_075_d[1]
     tangent_top_075 = line(m=m_top_075, x1=top_075[0], y1=top_075[1])
     tangent_bottom_075 = line(m=m_bottom_075, x1=bottom_075[0], y1=bottom_075[1])
     point_075 = line_intersection(tangent_top_075, tangent_bottom_075)
-    
+
     m_L = (point_075[1] - point_025[1]) / (point_075[0] - point_025[0])
     L = line(m=m_L, x1=point_025[0], y1=point_025[1])
 
     # Compute line vF which is perpendicular to L through the vanishing point
-    vF = line(m=-1/m_L, x1=v_x, y1=v_y)
+    vF = line(m=-1 / m_L, x1=v_x, y1=v_y)
     F = line_intersection(L, vF)
 
     # Cache bottom and top evaluations at 0 and 1
     bottom_0 = bottom(0)
     bottom_1 = bottom(1)
     top_0 = top(0)
-    
+
     L_0 = line(m=m_L, x1=bottom_0[0], y1=bottom_0[1])
     L_1 = line(m=m_L, x1=top_0[0], y1=top_0[1])
     p_0 = line_intersection(L_0, vF)
     p_1 = line_intersection(L_1, vF)
     q_0 = line_intersection(L_0, line(x1=F[0], y1=F[1], x2=bottom_1[0], y2=bottom_1[1]))
 
-    d = math.sqrt(p_1[0]**2 + p_1[1]**2 + f**2)  # euclidean from origin
+    d = math.sqrt(p_1[0] ** 2 + p_1[1] ** 2 + f**2)  # euclidean from origin
     theta = math.acos(f / (math.sqrt(v_x * v_x + v_y * v_y + f * f)))
     alpha = math.atan(d / f)
     beta = math.pi / 2 - theta
 
-    h_img = math.sqrt((p_0[0] - p_1[0])**2 + (p_0[1] - p_1[1])**2)  # euclidean
-    l_img = math.sqrt((q_0[0] - bottom_0[0])**2 + (q_0[1] - bottom_0[1])**2)  # euclidean
+    h_img = math.sqrt((p_0[0] - p_1[0]) ** 2 + (p_0[1] - p_1[1]) ** 2)  # euclidean
+    l_img = math.sqrt(
+        (q_0[0] - bottom_0[0]) ** 2 + (q_0[1] - bottom_0[1]) ** 2
+    )  # euclidean
 
     # Length of directrix D using vectorized integration
     n_int = 100
@@ -766,8 +876,8 @@ def compute_aspect_ratio(v_x: float, v_y: float, f: float, h: int, w: int, top: 
     D_derivs = np.empty((n_int, 2))
     for i, t in enumerate(t_int):
         D_derivs[i] = D(t, 1)
-    ds_magnitudes = np.sqrt(D_derivs[:, 0]**2 + D_derivs[:, 1]**2)
-    if hasattr(np, 'trapezoid'):
+    ds_magnitudes = np.sqrt(D_derivs[:, 0] ** 2 + D_derivs[:, 1] ** 2)
+    if hasattr(np, "trapezoid"):
         wl_img = np.trapezoid(ds_magnitudes, t_int)
     else:
         wl_img = np.trapz(ds_magnitudes, t_int)
@@ -781,12 +891,19 @@ def compute_aspect_ratio(v_x: float, v_y: float, f: float, h: int, w: int, top: 
     return r
 
 
-def _find_spline_line_intersection_batch(spline: UnivariateSpline, line_slopes: np.ndarray, line_intercepts: np.ndarray, x0: np.ndarray, max_iter: int = 30, tol: float = 1e-6) -> Tuple[np.ndarray, np.ndarray]:
+def _find_spline_line_intersection_batch(
+    spline: UnivariateSpline,
+    line_slopes: np.ndarray,
+    line_intercepts: np.ndarray,
+    x0: np.ndarray,
+    max_iter: int = 30,
+    tol: float = 1e-6,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Find intersections between a spline and multiple lines using vectorized Newton-Raphson.
-    
+
     Each line is defined as y = slope * x + intercept.
-    
+
     Parameters
     ----------
     spline : UnivariateSpline
@@ -801,7 +918,7 @@ def _find_spline_line_intersection_batch(spline: UnivariateSpline, line_slopes: 
         Maximum iterations for Newton-Raphson.
     tol : float
         Convergence tolerance.
-    
+
     Returns
     -------
     x : np.ndarray
@@ -811,31 +928,42 @@ def _find_spline_line_intersection_batch(spline: UnivariateSpline, line_slopes: 
     """
     x = x0.copy()
     h = 1e-7
-    
+
     for _ in range(max_iter):
         # f(x) = spline(x) - (slope * x + intercept)
         spline_vals = spline(x)
         f_val = spline_vals - (line_slopes * x + line_intercepts)
-        
+
         # Check convergence
         if np.all(np.abs(f_val) < tol):
             break
-        
+
         # Numerical derivative: f'(x) = spline'(x) - slope
         spline_deriv = (spline(x + h) - spline(x - h)) / (2 * h)
         df_val = spline_deriv - line_slopes
-        
+
         # Avoid division by zero
         df_val = np.where(np.abs(df_val) < 1e-12, 1e-12, df_val)
-        
+
         # Newton-Raphson update
         x = x - f_val / df_val
-    
+
     y = spline(x)
     return x, y
 
 
-def generate_mesh(num_latitudes: int, num_longitudes: int, longitudes: List[Callable[[float], float]], mu_top: float, mu_bottom: float, w: int, h: int, orig_w: int, orig_h: int, get_latitude: Callable[[float], Derivable]) -> Tuple[np.ndarray, np.ndarray]:
+def generate_mesh(
+    num_latitudes: int,
+    num_longitudes: int,
+    longitudes: List[Callable[[float], float]],
+    mu_top: float,
+    mu_bottom: float,
+    w: int,
+    h: int,
+    orig_w: int,
+    orig_h: int,
+    get_latitude: Callable[[float], Derivable],
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Return warped mesh.
 
@@ -871,39 +999,49 @@ def generate_mesh(num_latitudes: int, num_longitudes: int, longitudes: List[Call
         Adressing rows for mesh.
     """
     coords = np.empty((num_latitudes, num_longitudes, 2), dtype=np.float32)
-    
+
     # Pre-compute line parameters (y = slope * x + intercept) - vectorized
     line_slopes = np.array([lon(1) - lon(0) for lon in longitudes], dtype=np.float64)
     line_intercepts = np.array([lon(0) for lon in longitudes], dtype=np.float64)
-    
+
     # Initial guesses based on longitude x-values (estimate from image center)
     x0_base = np.linspace(0, w, num_longitudes, dtype=np.float64)
-    
+
     # Pre-compute all mu values
     mu_values = np.linspace(mu_top, mu_bottom, num_latitudes)
-    
+
     # Pre-compute all latitude splines to avoid repeated computation
     latitude_splines = [get_latitude(mu) for mu in mu_values]
-    
+
     # Process all latitudes with pre-computed splines
     for idx_lat, lat in enumerate(latitude_splines):
         # Use vectorized intersection finding
         x_intersect, y_intersect = _find_spline_line_intersection_batch(
             lat, line_slopes, line_intercepts, x0_base
         )
-        
+
         coords[idx_lat, :, 0] = x_intersect
         coords[idx_lat, :, 1] = y_intersect
 
     # Scale mesh - use in-place operations for efficiency
-    coords[:, :, 0] *= (orig_w / w)
-    coords[:, :, 1] *= (orig_h / h)
-    coords = cv.resize(coords, (orig_w, orig_h), interpolation=cv.INTER_LINEAR).astype(np.float32)
-    
+    coords[:, :, 0] *= orig_w / w
+    coords[:, :, 1] *= orig_h / h
+    coords = cv.resize(coords, (orig_w, orig_h), interpolation=cv.INTER_LINEAR).astype(
+        np.float32
+    )
+
     return coords[:, :, 0], coords[:, :, 1]
 
 
-def mrcdi(input_img: np.ndarray, barlines_img: np.ndarray, upper_img: np.ndarray, lower_img: np.ndarray, background_img: np.ndarray, original_img: np.ndarray, optimize_f: bool = False) -> np.ndarray:
+def mrcdi(
+    input_img: np.ndarray,
+    barlines_img: np.ndarray,
+    upper_img: np.ndarray,
+    lower_img: np.ndarray,
+    background_img: np.ndarray,
+    original_img: np.ndarray,
+    optimize_f: bool = False,
+) -> np.ndarray:
     """
     Perform metric rectification on given sheet music images.
     The algorithm is based on the paper
@@ -931,20 +1069,14 @@ def mrcdi(input_img: np.ndarray, barlines_img: np.ndarray, upper_img: np.ndarray
     score : np.ndarray
         Rectified score image.
     """
-    
+
     h, w, _ = input_img.shape
     min_dim = min(h, w)
     num_longitudes = int(w / min_dim * 20)
     num_latitudes = int(h / min_dim * 20)
 
-
-    logging.info('Estimating vanishing point')
-    left, right = get_outer_barlines(barlines_img)
-    v_x, v_y = line_intersection(left, right)
-
-
-    logging.info('Getting top and bottom stafflines')
-    stafflines = get_stafflines(upper_img, lower_img, w//num_longitudes)
+    logging.info("Getting top and bottom stafflines")
+    stafflines = get_stafflines(upper_img, lower_img, w // num_longitudes)
     # import matplotlib.pyplot as plt
     # plt.imshow(input_img, cmap='Greys')
     # for s in stafflines:
@@ -957,8 +1089,18 @@ def mrcdi(input_img: np.ndarray, barlines_img: np.ndarray, upper_img: np.ndarray
     #     plt.plot(x, y)
     # plt.show()
 
-    top, bottom = get_top_bottom_stafflines(stafflines, left, right)
+    # Use staffline endpoints as hints for barline detection
+    approx_left = None
+    approx_right = None
+    if len(stafflines) > 0:
+        approx_left = np.median([s.get_knots()[0] for s in stafflines])
+        approx_right = np.median([s.get_knots()[-1] for s in stafflines])
 
+    logging.info("Estimating vanishing point")
+    left, right = get_outer_barlines(barlines_img, approx_left, approx_right)
+    v_x, v_y = line_intersection(left, right)
+
+    top, bottom = get_top_bottom_stafflines(stafflines, left, right, max_dist=50)
 
     # logging.info('Estimating focal length')
     if optimize_f:
@@ -966,20 +1108,18 @@ def mrcdi(input_img: np.ndarray, barlines_img: np.ndarray, upper_img: np.ndarray
     else:
         f = 3760  # Value has so little influence, just fix it...
 
-
-    logging.info('Expand left/right boundaries')
+    logging.info("Expand left/right boundaries")
     # ... to cover the entire page
     left, right = expand_lr_boundaries(v_x, v_y, w, h)
 
-
-    logging.info('Computing distant latitude')
+    logging.info("Computing distant latitude")
     # Convert top/bottom to parametric splines
     top_x_start, _ = func_intersection(top[0], left)
-    top_x_end  , _ = func_intersection(top[0], right)
+    top_x_end, _ = func_intersection(top[0], right)
     top_parametric = to_parametric_spline(top[0], top_x_start, top_x_end)
 
     bottom_x_start, _ = func_intersection(bottom[0], left)
-    bottom_x_end  , _ = func_intersection(bottom[0], right)
+    bottom_x_end, _ = func_intersection(bottom[0], right)
     bottom_parametric = to_parametric_spline(bottom[0], bottom_x_start, bottom_x_end)
 
     # Use cached latitude computation for better performance
@@ -988,38 +1128,57 @@ def mrcdi(input_img: np.ndarray, barlines_img: np.ndarray, upper_img: np.ndarray
     get_latitude = lat_cache.get_latitude
     C_20 = get_latitude_parametric(20)
 
-
-    logging.info('Expanding upper/lower boundaries')
+    logging.info("Expanding upper/lower boundaries")
     # ... to cover the entire page
-    
+
     # TODO Make faster and possibly more elegant
     # mu_top = fsolve(lambda mu: max([get_latitude_parametric(mu)(t)[1] for t in np.linspace(0, 1, 20)]), 1)[0]
     # mu_bottom = fsolve(lambda mu: min([get_latitude_parametric(mu)(t)[1] for t in np.linspace(0, 1, 20)]) - h, 0)[0]
 
     # Another approach, needs testing
     # Note: minimize passes t as an array, so we need to extract the scalar with [0]
-    t_max_dist = minimize(lambda t: euclidean(top_parametric(t[0]), bottom_parametric(t[0])), [0.5], bounds=[(0, 1)]).x[0]
+    t_max_dist = minimize(
+        lambda t: euclidean(top_parametric(t[0]), bottom_parametric(t[0])),
+        [0.5],
+        bounds=[(0, 1)],
+    ).x[0]
     mu_top = fsolve(lambda mu: get_latitude_parametric(mu)(t_max_dist)[1], 1)[0]
     mu_bottom = fsolve(lambda mu: get_latitude_parametric(mu)(t_max_dist)[1] - h, 0)[0]
 
-
-    logging.info('Computing longitudes')
+    logging.info("Computing longitudes")
     longitudes, D_parametric = get_longitudes(v_x, v_y, f, C_20, num_longitudes)
 
+    logging.info("Computing aspect ratio")
+    ratio = compute_aspect_ratio(
+        v_x,
+        v_y,
+        f,
+        h,
+        w,
+        get_latitude_parametric(mu_top),
+        get_latitude_parametric(mu_bottom),
+        D_parametric,
+    )
 
-    logging.info('Computing aspect ratio')
-    ratio = compute_aspect_ratio(v_x, v_y, f, h, w, get_latitude_parametric(mu_top), get_latitude_parametric(mu_bottom), D_parametric)
-
-
-    logging.info('Generating mesh')
+    logging.info("Generating mesh")
     orig_h, orig_w = original_img.shape
-    cols, rows = generate_mesh(num_latitudes, num_longitudes, longitudes, mu_top, mu_bottom, w, h, orig_w, orig_h, get_latitude)
+    cols, rows = generate_mesh(
+        num_latitudes,
+        num_longitudes,
+        longitudes,
+        mu_top,
+        mu_bottom,
+        w,
+        h,
+        orig_w,
+        orig_h,
+        get_latitude,
+    )
 
     return cols, rows
 
-    #logging.info('Dewarping image')
-    #result = cv.remap(original_img, cols, rows, cv.INTER_CUBIC, None, cv.BORDER_CONSTANT, 255)
-
+    # logging.info('Dewarping image')
+    # result = cv.remap(original_img, cols, rows, cv.INTER_CUBIC, None, cv.BORDER_CONSTANT, 255)
 
     # logging.info('Drawing output')
     # import matplotlib.pyplot as plt
@@ -1060,23 +1219,20 @@ def mrcdi(input_img: np.ndarray, barlines_img: np.ndarray, upper_img: np.ndarray
     # plt.tight_layout()
     # plt.show()
 
-
     return result
 
 
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     from skimage.io import imread
     from cv2 import imwrite
 
     result = mrcdi(
-        input_img      = imread('test1/input.png'),
-        barlines_img   = imread('test1/barlines.png'),
-        upper_img      = imread('test1/upper.png'),
-        lower_img      = imread('test1/lower.png'),
-        background_img = imread('test1/background.png'),
-        original_img   = imread('test1/binarized.png'),
+        input_img=imread("test1/input.png"),
+        barlines_img=imread("test1/barlines.png"),
+        upper_img=imread("test1/upper.png"),
+        lower_img=imread("test1/lower.png"),
+        background_img=imread("test1/background.png"),
+        original_img=imread("test1/binarized.png"),
     )
 
-    imwrite('result.png', result)
+    imwrite("result.png", result)

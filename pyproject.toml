@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smude"
-version = "0.2.0"
+version = "0.2.1"
 description = "Sheet Music Dewarping - Binarization and rectification of sheet music images"
 readme = "README.md"
 requires-python = ">=3.12"
