@@ -48,7 +48,7 @@ class Smude:
         if not os.path.exists(checkpoint_path):
             print("First run. Downloading model...")
             url = (
-                "https://github.com/sonovice/smude/releases/download/v0.1.0/model.ckpt"
+                "https://github.com/sonovice/smude/releases/download/v0.2.0/model.ckpt"
             )
             response = requests.get(url, stream=True, allow_redirects=True)
             total_size_in_bytes = int(response.headers.get("content-length", 0))
