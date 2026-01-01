@@ -3,14 +3,10 @@ __author__ = "Simon Waloschek"
 import datetime
 import logging
 import time
-from functools import partial
-from multiprocessing import Pool
 from typing import Callable, Optional, Tuple
 
 import numpy as np
-from scipy.integrate import quad
-from scipy.interpolate import UnivariateSpline, interp1d
-from scipy.misc import derivative
+from scipy.interpolate import UnivariateSpline
 from scipy.optimize import fsolve
 from typing_extensions import Protocol
 
@@ -26,12 +22,12 @@ class RuntimeFormatter(logging.Formatter):
 
     def formatTime(self, record, datefmt=None):
         duration = datetime.datetime.utcfromtimestamp(record.created - self.start_time)
-        elapsed = duration.strftime('%H:%M:%S.%f')
+        elapsed = duration.strftime("%H:%M:%S.%f")
         return "{}".format(elapsed)
 
 
 def get_logger():
-    LOGFORMAT = '%(asctime)s - %(levelname)-9s: %(message)s'
+    LOGFORMAT = "%(asctime)s - %(levelname)-9s: %(message)s"
     handler = logging.StreamHandler()
     fmt = RuntimeFormatter(LOGFORMAT)
     handler.setFormatter(fmt)
@@ -41,7 +37,13 @@ def get_logger():
     return logger
 
 
-def line(m: Optional[float] = None, x1: Optional[float] = 0, y1: Optional[float] = 0, x2: Optional[float] = None, y2: Optional[float] = None) -> Callable[[float], float]:
+def line(
+    m: Optional[float] = None,
+    x1: Optional[float] = 0,
+    y1: Optional[float] = 0,
+    x2: Optional[float] = None,
+    y2: Optional[float] = None,
+) -> Callable[[float], float]:
     """
     Construct a 2D-line. Parameters can be given as
     - Slope and one (x, y) point on line
@@ -66,6 +68,7 @@ def line(m: Optional[float] = None, x1: Optional[float] = 0, y1: Optional[float]
     line : function
         2D-line as function f(x) = y.
     """
+
     def func(x):
         return m * (x - x1) + y1
 
@@ -106,28 +109,38 @@ def sample_spline_arc(spline: UnivariateSpline, num_samples: int) -> np.ndarray:
     #
     # (see https://tutorial.math.lamar.edu/classes/calcii/ParaArcLength.aspx)
 
-    # TODO Find workaround, very ugly! (But needed for Pool)
-    global _solve_b, _ds, _L_diff
+    # Pre-compute arc length using trapezoidal rule for speed
+    # Use fine sampling for accuracy
+    n_integration_points = 200
+    t_fine = np.linspace(0, 1, n_integration_points)
 
-    def _L_diff(t, ds, b):
-        return quad(ds, 0, t)[0] - b
+    # Pre-allocate array for ds computation (avoid list comprehension)
+    ds_values = np.empty((n_integration_points, 2))
+    for i, t in enumerate(t_fine):
+        ds_values[i] = spline(t, 1)
+    ds_magnitudes = np.sqrt(ds_values[:, 0] ** 2 + ds_values[:, 1] ** 2)
 
-    def _solve_b(f, ds, length):
-        return fsolve(_L_diff, 0, (ds, f * length))[0]
+    # Vectorized cumulative arc length using trapezoidal rule
+    dt = np.diff(t_fine)
+    increments = 0.5 * (ds_magnitudes[:-1] + ds_magnitudes[1:]) * dt
+    cumulative_length = np.concatenate([[0], np.cumsum(increments)])
 
-    def _ds(t):
-        return np.sqrt(np.power(spline(t, 1)[0], 2) + np.power(spline(t, 1)[1], 2))
+    total_length = cumulative_length[-1]
 
-    length = quad(_ds, 0, 1)[0]
+    # Target arc lengths for equidistant sampling
+    target_lengths = np.linspace(0, total_length, num_samples)
 
-    pool = Pool()
-    b_vals = pool.map(partial(_solve_b, ds=_ds, length=length), np.linspace(0, 1, num_samples).tolist())
-    #b_vals = [solve_b(f, ds, length) for f in np.linspace(0, 1, num_samples)]
+    # Interpolate to find t values corresponding to target arc lengths
+    b_vals = np.interp(target_lengths, cumulative_length, t_fine)
 
-    return np.asarray(b_vals)
+    return b_vals
 
 
-def func_intersection(func1: Callable[[float], float], func2: Callable[[float], float]) -> Tuple[float, float]:
+def func_intersection(
+    func1: Callable[[float], float],
+    func2: Callable[[float], float],
+    x0: float = 0.0,
+) -> Tuple[float, float]:
     """Return the intersection of two functions in R². Does find at most one intersection.
 
     Parameters
@@ -136,6 +149,8 @@ def func_intersection(func1: Callable[[float], float], func2: Callable[[float], 
         First function.
     func2 : Callable[[float], float]
         Second function.
+    x0 : float, optional
+        Initial guess for x coordinate, by default 0.0.
 
     Returns
     -------
@@ -145,14 +160,18 @@ def func_intersection(func1: Callable[[float], float], func2: Callable[[float], 
         Y coordinate of the intersection.
     """
 
-    diff = lambda x: func1(x) - func2(x)
-    x = fsolve(diff, 0)[0]
+    def diff(x):
+        return func1(x) - func2(x)
+
+    x = fsolve(diff, x0)[0]
     y = func1(x)
 
     return x, y
 
 
-def line_intersection(line1: Callable[[float], float], line2: Callable[[float], float]) -> Tuple[float, float]:
+def line_intersection(
+    line1: Callable[[float], float], line2: Callable[[float], float]
+) -> Tuple[float, float]:
     """
     Return the intersection point of two lines in R².
 
@@ -179,7 +198,7 @@ def line_intersection(line1: Callable[[float], float], line2: Callable[[float], 
     y2 = line2(0)
     m2 = line2(1) - y2
 
-    #print(y1, y2)
+    # print(y1, y2)
 
     # Check if lines are parallel
     if m1 == m2:
@@ -191,7 +210,11 @@ def line_intersection(line1: Callable[[float], float], line2: Callable[[float], 
     return x, y
 
 
-def to_parametric_spline(spline: UnivariateSpline, x_start: Optional[float] = None, x_end: Optional[float] = None) -> Derivable:
+def to_parametric_spline(
+    spline: UnivariateSpline,
+    x_start: Optional[float] = None,
+    x_end: Optional[float] = None,
+) -> Derivable:
     """
     Convert a regular 's(x) = y' spline into a 's(t) = (x, y)' parametric spline.
 
@@ -219,12 +242,16 @@ def to_parametric_spline(spline: UnivariateSpline, x_start: Optional[float] = No
         knots = spline.get_knots()
         x_end = knots[-1]
 
-    interpolator = interp1d((0, 1), (x_start, x_end), fill_value='extrapolate')
+    # Simple linear interpolation: x = x_start + t * (x_end - x_start)
+    # This is faster than using interp1d for a simple linear case
+    x_range = x_end - x_start
+    x_derivative = x_range  # dx/dt = x_end - x_start
 
     def parametric_spline(t, d=0):
-        x = interpolator(t)
+        # Linear interpolation: x = x_start + t * x_range
+        x = x_start + t * x_range
         if d > 0:
-            x_dt = derivative(interpolator, t, d)
+            x_dt = x_derivative
         else:
             x_dt = x
         y_dt = spline(x, d)

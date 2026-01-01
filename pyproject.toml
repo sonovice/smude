@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smude"
+version = "0.2.0"
+description = "Sheet Music Dewarping - Binarization and rectification of sheet music images"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    { name = "Simon Waloschek" },
+]
+dependencies = [
+    "numpy>=2.4.0",
+    "torch>=2.9.1",
+    "pytorch-lightning>=2.6.0",
+    "scikit-image>=0.26.0",
+    "scipy>=1.16.3",
+    "torchvision>=0.24.1",
+    "typing-extensions>=4.15.0",
+    "tqdm>=4.67.1",
+    "requests>=2.32.5",
+    "opencv-contrib-python>=4.11.0",
+]
+
+[project.scripts]
+smude = "smude.cli:main"

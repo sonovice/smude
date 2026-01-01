@@ -4,10 +4,49 @@ from typing import Tuple
 
 import cv2
 import numpy as np
-from scipy import ndimage
-from skimage.exposure import equalize_adapthist
-from skimage.morphology import square
 from skimage.segmentation import felzenszwalb
+
+
+def _square_kernel(size: int) -> np.ndarray:
+    """Create a square structuring element (kernel) for morphological operations."""
+    return np.ones((size, size), dtype=np.uint8)
+
+
+def _fill_holes_opencv(binary_image: np.ndarray) -> np.ndarray:
+    """
+    Fill holes in a binary image using OpenCV flood fill.
+    Faster alternative to scipy.ndimage.binary_fill_holes.
+
+    Parameters
+    ----------
+    binary_image : np.ndarray
+        Binary image (boolean or uint8).
+
+    Returns
+    -------
+    np.ndarray
+        Binary image with holes filled.
+    """
+    # Ensure uint8 type
+    if binary_image.dtype == bool:
+        binary_uint8 = binary_image.astype(np.uint8) * 255
+    else:
+        binary_uint8 = (binary_image > 0).astype(np.uint8) * 255
+
+    # Create a mask for flood fill (needs to be 2 pixels larger)
+    h, w = binary_uint8.shape
+    mask = np.zeros((h + 2, w + 2), np.uint8)
+
+    # Create inverted copy
+    inverted = cv2.bitwise_not(binary_uint8)
+
+    # Flood fill from the corner (assuming background is connected to edges)
+    cv2.floodFill(inverted, mask, (0, 0), 0)
+
+    # Combine original with filled holes
+    filled = binary_uint8 | inverted
+
+    return filled > 0
 
 
 def get_border(image: np.ndarray) -> Tuple[int, int, int, int]:
@@ -48,7 +87,9 @@ def auto_canny(image, sigma=0):
     return edged
 
 
-def extract_roi_mask(image: np.ndarray, min_hull_ratio: float = 0.4) -> Tuple[np.ndarray, float]:
+def extract_roi_mask(
+    image: np.ndarray, min_hull_ratio: float = 0.4
+) -> Tuple[np.ndarray, float]:
     """
     Extract region of interest (ROI) for the given image.
 
@@ -77,9 +118,13 @@ def extract_roi_mask(image: np.ndarray, min_hull_ratio: float = 0.4) -> Tuple[np
     image_resized = cv2.resize(image, (size, size))
 
     image_gray = cv2.cvtColor(image_resized, cv2.COLOR_RGB2GRAY)
-    image_eq = equalize_adapthist(image_gray) * 255
-    image_canny = auto_canny(image_eq.astype(np.uint8))
-    image_canny = cv2.morphologyEx(image_canny, cv2.MORPH_DILATE, kernel=square(2))
+    # Use OpenCV CLAHE instead of skimage's equalize_adapthist (much faster)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    image_eq = clahe.apply(image_gray)
+    image_canny = auto_canny(image_eq)
+    image_canny = cv2.morphologyEx(
+        image_canny, cv2.MORPH_DILATE, kernel=_square_kernel(2)
+    )
     image_segmented = felzenszwalb(image_canny, scale=1000, sigma=0.3, min_size=50)
 
     segment_sizes = np.bincount(image_segmented.flatten())
@@ -87,33 +132,46 @@ def extract_roi_mask(image: np.ndarray, min_hull_ratio: float = 0.4) -> Tuple[np
 
     # Iterate over 5 largest segments, starting from largest
     for s in segments[:5]:
-        # Get segment and fill all holes
+        # Get segment and fill all holes using OpenCV (faster than scipy ndimage)
         segment = image_segmented == s
-        hull = ndimage.binary_fill_holes(segment)
+        hull = _fill_holes_opencv(segment)
 
         # Removes areas that are only connected by few pixels to the hull
-        hull_opened = cv2.morphologyEx(hull.astype(np.uint8), cv2.MORPH_OPEN, kernel=square(20))
+        hull_opened = cv2.morphologyEx(
+            hull.astype(np.uint8), cv2.MORPH_OPEN, kernel=_square_kernel(20)
+        )
 
         # Take center blob
-        #blobs_segmented = measure.label(hull_opened)
+        # blobs_segmented = measure.label(hull_opened)
         _, blobs_segmented = cv2.connectedComponents(hull_opened, connectivity=4)
         center_blob_label = blobs_segmented[size // 2, size // 2]
         hull = blobs_segmented == center_blob_label
 
         # Exit if hull_ratio is sufficient
         hull_ratio = np.sum(hull) / (size**2)
-        if hull_ratio >= min_hull_ratio and (int(np.any(hull[0])) + int(np.any(hull[size-1])) + int(np.any(hull[:,0])) + int(np.any(hull[:,size-1]))) < 4:
+        if (
+            hull_ratio >= min_hull_ratio
+            and (
+                int(np.any(hull[0]))
+                + int(np.any(hull[size - 1]))
+                + int(np.any(hull[:, 0]))
+                + int(np.any(hull[:, size - 1]))
+            )
+            < 4
+        ):
             break
 
     # Raise error if hull_ratio criterion could not be met
     if hull_ratio < min_hull_ratio:
-        raise Exception('ROI could not be computed')
+        raise Exception("ROI could not be computed")
 
     # Resize mask back to original image size
     mask_fullsize = cv2.resize(hull.astype(np.uint8), (height, width))
 
     # Remove outer pixels so that dark residual pixels are removed
-    mask_fullsize = cv2.morphologyEx(mask_fullsize, cv2.MORPH_ERODE, kernel=square(25))
+    mask_fullsize = cv2.morphologyEx(
+        mask_fullsize, cv2.MORPH_ERODE, kernel=_square_kernel(25)
+    )
     mask_ratio = np.sum(hull) / (size**2)
 
     return mask_fullsize, mask_ratio

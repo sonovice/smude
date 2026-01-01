@@ -143,4 +143,5 @@ class SegModel(pl.LightningModule):
 
 
 def load_model(checkpoint_path: str) -> pl.LightningModule:
-    return SegModel.load_from_checkpoint(checkpoint_path)
+    # weights_only=False is needed for PyTorch 2.6+ compatibility with old checkpoints
+    return SegModel.load_from_checkpoint(checkpoint_path, weights_only=False)

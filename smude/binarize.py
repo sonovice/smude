@@ -2,10 +2,8 @@ __author__ = "Simon Waloschek"
 
 import numpy as np
 import cv2
-from skimage.morphology import remove_small_holes
-from skimage.segmentation import flood_fill
 
-#@profile
+
 def binarize(image: np.ndarray, holes_threshold: float = 20) -> np.ndarray:
     """
     Binarize image using Sauvola algorithm.
@@ -33,11 +31,10 @@ def binarize(image: np.ndarray, holes_threshold: float = 20) -> np.ndarray:
     # Threshold using Sauvola algorithm
     binary_sauvola = cv2.ximgproc.niBlackThreshold(image_eq, 255, k=0.25, blockSize=51, type=cv2.THRESH_BINARY, binarizationMethod=cv2.ximgproc.BINARIZATION_SAUVOLA)
 
-    # Remove small objects
-    #binary_cleaned = 1.0 * remove_small_holes(binary_sauvola, area_threshold=holes_threshold)
+    # Remove thick black border (introduced during thresholding) using OpenCV floodFill (faster than skimage)
+    # OpenCV floodFill modifies the image in-place and requires uint8
+    binary_sauvola = binary_sauvola.astype(np.uint8)
+    cv2.floodFill(binary_sauvola, None, (0, 0), 0)
+    cv2.floodFill(binary_sauvola, None, (0, 0), 1)
 
-    # Remove thick black border (introduced during thresholding)
-    binary_sauvola = flood_fill(binary_sauvola, (0, 0), 0)
-    binary_sauvola = flood_fill(binary_sauvola, (0, 0), 1)
-
-    return binary_sauvola.astype(np.bool)
+    return binary_sauvola.astype(bool)
