@@ -70,6 +70,9 @@ def get_border(image: np.ndarray) -> Tuple[int, int, int, int]:
         Y-Coordinate of last non-white pixel.
     """
     cols, rows = np.where(image == 0)
+    if len(cols) == 0:
+        # No non-white pixels found, return full image bounds
+        return 0, image.shape[0], 0, image.shape[1]
     x_start = np.min(cols)
     x_end = np.max(cols) + 1
 

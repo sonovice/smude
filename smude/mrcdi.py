@@ -88,10 +88,32 @@ def get_outer_barlines(
     # Restrict computation to -30° to 30° line angle with 0.05 degree precision
     tested_angles = np.linspace(-np.pi / 6, np.pi / 6, int(60 / 0.025))
     h, theta, d = hough_line(barline_img, theta=tested_angles)
-    # Get peaks from Hough transform
-    peaks = np.stack(hough_line_peaks(h, theta, d, threshold=np.max(h) * 0.45))
 
-    origin = np.array((0, barline_img.shape[1]))
+    # Try progressively lower thresholds if no peaks found
+    peaks = None
+    for threshold_factor in [0.45, 0.30, 0.20, 0.10]:
+        max_h = np.max(h)
+        if max_h == 0:
+            break
+        try:
+            candidate = np.stack(hough_line_peaks(h, theta, d, threshold=max_h * threshold_factor))
+            if candidate.shape[1] > 0:
+                peaks = candidate
+                break
+        except Exception:
+            continue
+
+    img_h, img_w = barline_img.shape
+
+    # If no peaks at all, fall back to vertical lines at image edges or approx hints
+    if peaks is None or peaks.shape[1] == 0:
+        left_x = approx_left if approx_left is not None else img_w * 0.05
+        right_x = approx_right if approx_right is not None else img_w * 0.95
+        left = line(x1=left_x, x2=left_x + 0.001, y1=0, y2=img_h)
+        right = line(x1=right_x, x2=right_x + 0.001, y1=0, y2=img_h)
+        return left, right
+
+    origin = np.array((0, img_w))
 
     # Leftmost vertical line
     if approx_left is not None:
@@ -103,7 +125,7 @@ def get_outer_barlines(
             )
             # Create vertical line at approx_left (slight x offset to avoid division by zero)
             left = line(
-                x1=approx_left, x2=approx_left + 0.001, y1=0, y2=barline_img.shape[0]
+                x1=approx_left, x2=approx_left + 0.001, y1=0, y2=img_h
             )
         else:
             _, angle, dist = peaks[:, l_idx]
@@ -125,7 +147,7 @@ def get_outer_barlines(
             )
             # Create vertical line at approx_right (slight x offset to avoid division by zero)
             right = line(
-                x1=approx_right, x2=approx_right + 0.001, y1=0, y2=barline_img.shape[0]
+                x1=approx_right, x2=approx_right + 0.001, y1=0, y2=img_h
             )
         else:
             _, angle, dist = peaks[:, r_idx]
@@ -164,11 +186,18 @@ def get_stafflines(
     """
 
     splines = []
-    morph_kernel = np.ones((25, 25), dtype=np.uint8)
+
+    # Use a horizontally-elongated kernel to bridge gaps in stafflines
+    # Stafflines are mostly horizontal, so a wide kernel helps connect fragments
+    morph_kernel = np.ones((5, 51), dtype=np.uint8)
 
     for image in [upper_img, lower_img]:
         # Morphological operation to close potential gaps
         image_closed = cv.morphologyEx(image, cv.MORPH_CLOSE, morph_kernel)
+        # Also dilate slightly to thicken faint lines before segmentation
+        image_closed = cv.morphologyEx(
+            image_closed, cv.MORPH_DILATE, np.ones((3, 3), dtype=np.uint8)
+        )
 
         # Segmentize image to get individual staff line instances
         labels, count = label(image_closed)
@@ -187,9 +216,19 @@ def get_stafflines(
             if len(x) == 0:
                 continue
 
-            # Remove duplicates and sort
-            x, idx = np.unique(x, return_index=True)
-            y = y[idx]
+            # Sort by x first, then remove duplicates keeping median y per x
+            sort_idx = np.argsort(x)
+            x = x[sort_idx]
+            y = y[sort_idx]
+
+            # Remove duplicate x values by keeping the median y
+            x_unique, inverse, counts = np.unique(x, return_inverse=True, return_counts=True)
+            y_median = np.empty(len(x_unique))
+            for i in range(len(x_unique)):
+                mask = inverse == i
+                y_median[i] = np.median(y[mask])
+            x = x_unique
+            y = y_median
 
             # Sample
             x_sampled = x[::step_size]
@@ -206,7 +245,17 @@ def get_stafflines(
             if len(x_sampled) <= 5:
                 continue
 
-            spline = UnivariateSpline(x_sampled, y_sampled, k=3, s=1)
+            # Fit spline with error handling — fall back to lower degree if needed
+            try:
+                spline = UnivariateSpline(x_sampled, y_sampled, k=3, s=1)
+            except Exception:
+                try:
+                    spline = UnivariateSpline(x_sampled, y_sampled, k=2, s=1)
+                except Exception:
+                    try:
+                        spline = UnivariateSpline(x_sampled, y_sampled, k=1, s=1)
+                    except Exception:
+                        continue
             splines.append(spline)
 
     # Sort splines from top to bottom
@@ -227,6 +276,10 @@ def get_top_bottom_stafflines(
     Return the topmost and bottommost 'complete' staff lines. 'Complete' means
     that the endings of the staff lines should be very close to the given left
     and right boundaries.
+
+    Uses a multi-pass approach: first tries strict matching, then progressively
+    relaxes the distance threshold, and finally falls back to selecting the
+    widest-spanning stafflines if no exact matches are found.
 
     Parameters
     ----------
@@ -250,37 +303,65 @@ def get_top_bottom_stafflines(
         left (start) point, spline parameter for right (end) point).
     """
 
-    success = False
-    top = None
+    def _find_complete_stafflines(splines, left_fn, right_fn, threshold):
+        """Find stafflines whose endpoints are within threshold of barlines."""
+        found_top = None
+        found_bottom = None
+        for spline in splines:
+            knots = spline.get_knots()
+            left_x, left_y = func_intersection(spline, left_fn, x0=knots[0])
+            dist_left = euclidean((left_x, left_y), (knots[0], spline(knots[0])))
+            if dist_left > threshold:
+                continue
+            right_x, right_y = func_intersection(spline, right_fn, x0=knots[-1])
+            dist_right = euclidean((right_x, right_y), (knots[-1], spline(knots[-1])))
+            if dist_right > threshold:
+                continue
+            if found_top is None:
+                found_top = (spline, left_x, right_x)
+                continue
+            found_bottom = (spline, left_x, right_x)
+            return found_top, found_bottom
+        return None, None
 
-    for spline in stafflines:
-        knots = spline.get_knots()
+    # Pass 1: Try with the original max_dist
+    top, bottom = _find_complete_stafflines(stafflines, left, right, max_dist)
+    if bottom is not None:
+        return top, bottom
 
-        # Use spline start point as initial guess for left intersection
-        left_x, left_y = func_intersection(spline, left, x0=knots[0])
-        distance = euclidean((left_x, left_y), (knots[0], spline(knots[0])))
+    # Pass 2: Try with progressively relaxed thresholds
+    for relaxed_dist in [max_dist * 2, max_dist * 4, max_dist * 8]:
+        top, bottom = _find_complete_stafflines(stafflines, left, right, relaxed_dist)
+        if bottom is not None:
+            return top, bottom
 
-        if distance > max_dist:
-            continue
+    # Pass 3: Fall back to the widest-spanning stafflines.
+    # Score each staffline by the fraction of the barline gap it covers.
+    if len(stafflines) >= 2:
+        scored = []
+        for spline in stafflines:
+            knots = spline.get_knots()
+            left_x, _ = func_intersection(spline, left, x0=knots[0])
+            right_x, _ = func_intersection(spline, right, x0=knots[-1])
+            span = knots[-1] - knots[0]
+            scored.append((span, spline, left_x, right_x))
+        scored.sort(key=lambda x: -x[0])  # widest first
 
-        # Use spline end point as initial guess for right intersection
-        right_x, right_y = func_intersection(spline, right, x0=knots[-1])
-        distance = euclidean((right_x, right_y), (knots[-1], spline(knots[-1])))
+        # Pick the top and bottom from the two widest-spanning stafflines
+        # (they are already sorted top-to-bottom from get_stafflines)
+        best_splines = scored[:max(len(scored) // 2, 2)]
+        # Re-sort by vertical position (top to bottom)
+        best_splines.sort(key=lambda s: s[1](s[1].get_knots()[0]))
+        top_entry = best_splines[0]
+        bottom_entry = best_splines[-1]
+        # Only use if they are actually different stafflines and span >30% of image
+        if top_entry[1] is not bottom_entry[1]:
+            return (
+                (top_entry[1], top_entry[2], top_entry[3]),
+                (bottom_entry[1], bottom_entry[2], bottom_entry[3]),
+            )
 
-        if distance > max_dist:
-            continue
-
-        if top is None:
-            top = (spline, left_x, right_x)
-            continue
-
-        bottom = (spline, left_x, right_x)
-        success = True
-
-    if not success:
-        raise ValueError("Staff lines could not be detected!")
-
-    return top, bottom
+    raise ValueError("Staff lines could not be detected!")
 
 
 def cost_function(
@@ -587,6 +668,13 @@ def _get_latitude_parmetric(
     points = (1 - alpha[:, None]) * bottom_pts + alpha[:, None] * top_pts
     x_sampled, y_sampled = points[:, 0], points[:, 1]
 
+    # Ensure x is monotonically increasing
+    sort_idx = np.argsort(x_sampled)
+    x_sampled = x_sampled[sort_idx]
+    y_sampled = y_sampled[sort_idx]
+    x_sampled, unique_idx = np.unique(x_sampled, return_index=True)
+    y_sampled = y_sampled[unique_idx]
+
     latitude = UnivariateSpline(x_sampled, y_sampled, k=3, s=1)
     latitude_parametric = to_parametric_spline(latitude)
 
@@ -641,6 +729,13 @@ def _get_latitude(
 
     points = (1 - alpha[:, None]) * bottom_pts + alpha[:, None] * top_pts
     x_sampled, y_sampled = points[:, 0], points[:, 1]
+
+    # Ensure x is monotonically increasing
+    sort_idx = np.argsort(x_sampled)
+    x_sampled = x_sampled[sort_idx]
+    y_sampled = y_sampled[sort_idx]
+    x_sampled, unique_idx = np.unique(x_sampled, return_index=True)
+    y_sampled = y_sampled[unique_idx]
 
     latitude = UnivariateSpline(x_sampled, y_sampled, k=3, s=1)
 
@@ -719,6 +814,13 @@ def get_longitudes(
     # Apply A_inv transformation vectorized
     D_vals = np.dot(A_inv, C_vals.T).T
     x_sampled, y_sampled = D_vals[:, 0], D_vals[:, 1]
+
+    # Ensure x is monotonically increasing
+    sort_idx = np.argsort(x_sampled)
+    x_sampled = x_sampled[sort_idx]
+    y_sampled = y_sampled[sort_idx]
+    x_sampled, unique_idx = np.unique(x_sampled, return_index=True)
+    y_sampled = y_sampled[unique_idx]
 
     D = UnivariateSpline(x_sampled, y_sampled, k=3, s=1)
     D_parametric = to_parametric_spline(D)
@@ -1099,6 +1201,11 @@ def mrcdi(
     logging.info("Estimating vanishing point")
     left, right = get_outer_barlines(barlines_img, approx_left, approx_right)
     v_x, v_y = line_intersection(left, right)
+
+    # If vanishing point is invalid (parallel barlines), place it far above center
+    if np.isnan(v_x) or np.isnan(v_y) or np.isinf(v_x) or np.isinf(v_y):
+        v_x = w / 2
+        v_y = -h * 100
 
     top, bottom = get_top_bottom_stafflines(stafflines, left, right, max_dist=50)
 

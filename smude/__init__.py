@@ -109,14 +109,8 @@ class Smude:
         logging.info("Extracting ROI...")
         roi_mask, mask_ratio = extract_roi_mask(image)
 
-        # Repeat mask for each RGB channel
-        mask_3c = np.broadcast_to(roi_mask[..., None], roi_mask.shape + (3,))
-        # Obtain masked result image
-        result = image * mask_3c
-
         logging.info("Binarizing...")
-        # Binarize ROI
-        binarized = binarize(result)
+        binarized = binarize(image, roi_mask=roi_mask)
 
         # Remove borders
         x_start, x_end, y_start, y_end = get_border(binarized)
@@ -188,6 +182,9 @@ class Smude:
             )
         else:
             # TODO rework the image manipulation part here
+            # Apply ROI mask on original image for color output
+            mask_3c = np.broadcast_to(roi_mask[..., None], roi_mask.shape + (3,))
+            image = (image * mask_3c + (1 - mask_3c) * 255).astype(np.uint8)
             # Remove borders
             image = image[x_start:x_end, y_start:y_end]
             dewarped = []
