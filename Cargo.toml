@@ -1,0 +1,38 @@
+[package]
+name = "smude-geometry"
+version = "2.0.0-alpha.1"
+edition = "2024"
+publish = false
+description = "Native GCS and staff-driven sheet music rectification"
+license = "LicenseRef-Commons-Clause-AGPL-3.0"
+
+[features]
+default = ["cli", "onnx-pages"]
+render = ["dep:image", "dep:rayon"]
+cli = ["render", "dep:clap", "dep:serde_json"]
+onnx-pages = ["render", "dep:onnx-runtime"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+rayon = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+onnx-runtime = { package = "ort", version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "api-31"], optional = true }
+
+# The published Apple/Windows runtime archives include these providers.
+# Session initialization still explicitly prefers the CPU.
+[target.'cfg(target_os = "macos")'.dependencies]
+onnx-runtime = { package = "ort", version = "=2.0.0-rc.15", default-features = false, features = ["coreml"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+onnx-runtime = { package = "ort", version = "=2.0.0-rc.15", default-features = false, features = ["directml", "copy-dylibs"], optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+
+[[bin]]
+name = "smude-v2"
+path = "src/main.rs"
+required-features = ["cli"]
