@@ -33,6 +33,7 @@ pub struct GcsReport {
     pub staff_groups: usize,
     pub full_bar_paths: usize,
     pub edge_paths: usize,
+    pub boundary_columns: Vec<crate::BoundaryColumn>,
     pub height_width_ratio: Option<f64>,
     pub aspect_constraint: &'static str,
     pub camera_principal_point_source: &'static str,
@@ -252,6 +253,7 @@ impl GcsMap {
             staff_groups: 0,
             full_bar_paths: 0,
             edge_paths: 0,
+            boundary_columns: vec![],
             height_width_ratio: None,
             aspect_constraint: "not supplied",
             camera_principal_point_source: "explicit model parameters",
@@ -619,6 +621,7 @@ impl GcsMap {
         best.report.staff_groups = data.staves.len();
         best.report.full_bar_paths = data.barlines.len();
         best.report.edge_paths = observations.edges.len();
+        best.report.boundary_columns = observations.boundary_columns.clone();
         best.report.height_width_ratio = height_width_ratio;
         best.report.roll_initialization_radians = roll;
         best.report.paper_pose_initialization = paper_pose.map(|p| p.rvec);
@@ -779,6 +782,7 @@ struct FitData {
     staffs: Vec<[Vec<Point>; 5]>,
     bars: Vec<Vec<Point>>,
     edges: Vec<(Vec<Point>, f64)>,
+    boundary_columns: Vec<crate::BoundaryColumn>,
     space: f64,
     original_y_scale: f64,
     ratio: Option<f64>,
@@ -830,6 +834,7 @@ impl FitData {
                 sample_path(&raw, 16)
             })
             .collect();
+        let edges_for_columns = edges;
         let edges = edges
             .iter()
             .filter(|e| e.confidence >= 0.7 && e.points.len() >= 3)
@@ -839,6 +844,7 @@ impl FitData {
             staffs,
             bars,
             edges,
+            boundary_columns: crate::system_boundaries::detect(data, edges_for_columns),
             space,
             original_y_scale: stddev(&all_y).max(space),
             ratio,
@@ -896,6 +902,23 @@ impl FitData {
             let p: Vec<_> = path.iter().map(|p| map.forward(*p)).collect();
             let mean = p.iter().map(|p| p.x).sum::<f64>() / p.len() as f64;
             out.extend(p.iter().map(|p| w * robust((p.x - mean) / output_space)));
+        }
+        let count = self
+            .boundary_columns
+            .iter()
+            .map(|c| c.points.len())
+            .sum::<usize>();
+        // Balance two page-spanning column families against the complete staff
+        // evidence; sample density must not change their relative influence.
+        let column_weight = 1.5 * (self.staffs.len() as f64 * 120. / count.max(1) as f64).sqrt();
+        for column in &self.boundary_columns {
+            let points: Vec<_> = column.points.iter().map(|p| map.forward(*p)).collect();
+            let mean = points.iter().map(|p| p.x).sum::<f64>() / points.len() as f64;
+            out.extend(
+                points
+                    .iter()
+                    .map(|p| column_weight * robust((p.x - mean) / output_space)),
+            );
         }
         // Residuals are dimensionless in rectified staff spaces, preventing a
         // uniform-scale collapse from reducing their cost. Source-camera y

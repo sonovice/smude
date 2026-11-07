@@ -380,7 +380,9 @@ pub(super) fn process(
         && let Some(source) = source.as_ref()
     {
         let started = Instant::now();
-        let scale = (1000. / f64::from(raster_width.max(raster_height))).min(1.);
+        // Small titles and footers need more than the staff analysis raster.
+        // This remains bounded independently of the full-resolution output.
+        let scale = (1800. / f64::from(raster_width.max(raster_height))).min(1.);
         let (aw, ah) = (
             (f64::from(raster_width) * scale).round().max(2.) as u32,
             (f64::from(raster_height) * scale).round().max(2.) as u32,
@@ -573,7 +575,7 @@ pub(super) fn process(
         profile.failure_stage = Some("print_normalization");
         let print_start = Instant::now();
         let mut clean = crate::normalize_paper(&gray);
-        let normalized_before_cleanup = clean.clone();
+        let normalized_before_cleanup = args.diagnostics.then(|| clean.clone());
         profile.print_normalization_seconds = print_start.elapsed().as_secs_f64();
         let mut border_removed_pixels = 0;
         let mut border_margin_pixels = 0;
@@ -599,14 +601,16 @@ pub(super) fn process(
             );
             // Share confirmed cleanup with the non-normalized grayscale too;
             // tone differences are retained everywhere else.
-            for ((pixel, before), after) in gray
-                .as_mut()
-                .iter_mut()
-                .zip(normalized_before_cleanup.as_raw())
-                .zip(clean.as_raw())
-            {
-                if *after == 255 && *before < 255 {
-                    *pixel = 255;
+            if let Some(normalized_before_cleanup) = &normalized_before_cleanup {
+                for ((pixel, before), after) in gray
+                    .as_mut()
+                    .iter_mut()
+                    .zip(normalized_before_cleanup.as_raw())
+                    .zip(clean.as_raw())
+                {
+                    if *after == 255 && *before < 255 {
+                        *pixel = 255;
+                    }
                 }
             }
             profile.print_border_seconds = print_border_start.elapsed().as_secs_f64();
@@ -631,25 +635,29 @@ pub(super) fn process(
             };
             let [x, y, w, h] = final_crop;
             if final_crop != [0, 0, raster_width, raster_height] {
-                result = image::imageops::crop_imm(&result, x, y, w, h).to_image();
-                gray = image::imageops::crop_imm(&gray, x, y, w, h).to_image();
-                binary = image::imageops::crop_imm(&binary, x, y, w, h).to_image();
+                if args.diagnostics {
+                    result = image::imageops::crop_imm(&result, x, y, w, h).to_image();
+                    gray = image::imageops::crop_imm(&gray, x, y, w, h).to_image();
+                    binary = image::imageops::crop_imm(&binary, x, y, w, h).to_image();
+                }
                 clean = image::imageops::crop_imm(&clean, x, y, w, h).to_image();
             }
         }
         profile.final_crop_seconds = crop_started.elapsed().as_secs_f64();
         profile.failure_stage = Some("png_write");
         let png_start = Instant::now();
-        let file = fs::File::create(out.join("rectified.png"))?;
-        PngEncoder::new_with_quality(file, CompressionType::Default, FilterType::Adaptive)
-            .write_image(
-                result.as_raw(),
-                result.width(),
-                result.height(),
-                image::ExtendedColorType::Rgb8,
-            )?;
-        gray.save(out.join("rectified-gray.png"))?;
-        binary.save(out.join("rectified-binary.png"))?;
+        if args.diagnostics {
+            let file = fs::File::create(out.join("rectified.png"))?;
+            PngEncoder::new_with_quality(file, CompressionType::Default, FilterType::Adaptive)
+                .write_image(
+                    result.as_raw(),
+                    result.width(),
+                    result.height(),
+                    image::ExtendedColorType::Rgb8,
+                )?;
+            gray.save(out.join("rectified-gray.png"))?;
+            binary.save(out.join("rectified-binary.png"))?;
+        }
         clean.save(out.join("rectified-clean.png"))?;
         profile.png_write_seconds += png_start.elapsed().as_secs_f64();
         (

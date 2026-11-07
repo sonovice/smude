@@ -51,7 +51,7 @@ fn score_image() -> RgbImage {
 }
 
 #[test]
-fn shared_engine_returns_full_resolution_output_paths_for_all_formats() {
+fn shared_engine_keeps_default_clean_equal_to_diagnostic_output() {
     let fixture = Fixture::new();
     let image = score_image();
     let input = fixture.0.join("scan.png");
@@ -122,6 +122,26 @@ fn shared_engine_returns_full_resolution_output_paths_for_all_formats() {
     }
     assert_eq!(result.pages.len(), 1);
     assert!(result.warnings.is_empty());
+    let clean = result.pages[0].image(OutputKind::Clean);
+    assert_eq!(
+        fs::read(&clean).unwrap(),
+        fs::read(plain.pages[0].image(OutputKind::Clean)).unwrap()
+    );
+    for kind in [OutputKind::Gray, OutputKind::Binary, OutputKind::Color] {
+        assert!(!result.pages[0].image(kind).exists());
+    }
+    let diagnostics = smude_geometry::application::run(&smude_geometry::application::Options {
+        image: input,
+        out: fixture.0.join("diagnostics"),
+        no_pages: true,
+        diagnostics: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+        fs::read(&clean).unwrap(),
+        fs::read(diagnostics.pages[0].image(OutputKind::Clean)).unwrap()
+    );
     let mut dimensions = None;
     for kind in [
         OutputKind::Clean,
@@ -129,12 +149,7 @@ fn shared_engine_returns_full_resolution_output_paths_for_all_formats() {
         OutputKind::Binary,
         OutputKind::Color,
     ] {
-        let path = result.pages[0].image(kind);
-        assert_eq!(
-            fs::read(&path).unwrap(),
-            fs::read(plain.pages[0].image(kind)).unwrap()
-        );
-        let size = image::image_dimensions(path).unwrap();
+        let size = image::image_dimensions(diagnostics.pages[0].image(kind)).unwrap();
         assert_eq!(*dimensions.get_or_insert(size), size);
         assert!(size.0 >= 900 && size.1 >= 700);
     }

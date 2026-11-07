@@ -29,6 +29,9 @@ pub(super) enum CropMode {
     about = "Native GCS and staff-driven rectification with default ONNX page detection"
 )]
 pub(super) struct Args {
+    /// Also write source/analysis images and color, grayscale and binary variants.
+    #[arg(long)]
+    pub(super) diagnostics: bool,
     /// Existing Smude barlines.json in original-image pixels.
     #[arg(long)]
     pub(super) geometry: Option<PathBuf>,
@@ -132,6 +135,7 @@ impl From<Args> for smude_geometry::application::Options {
         use smude_geometry::application as engine;
         Self {
             progress: None,
+            diagnostics: args.diagnostics,
             geometry: args.geometry,
             geometry_corners: args.geometry_corners,
             geometry_contour: args.geometry_contour,

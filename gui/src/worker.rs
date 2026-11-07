@@ -35,7 +35,10 @@ impl Processor {
         let (completed, rx) = mpsc::channel();
         let (progress_tx, progress) = mpsc::channel();
         thread::Builder::new().name("smude-processing".into()).spawn(move || {
-            let threads = std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).clamp(1, 4));
+            // Leave room for the UI, but do not cap large machines at four workers.
+            let available = std::thread::available_parallelism().map_or(3, |n| n.get());
+            let reserved = if available >= 8 { 2 } else { 1 };
+            let threads = available.saturating_sub(reserved).clamp(1, 8);
                 let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("processing pool");
                 while let Ok(job) = jobs.recv() {
                 let start = Instant::now();

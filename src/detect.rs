@@ -2,11 +2,13 @@
 //! A native baseline derived from Smude's tested Python experiment, not OMR
 //! assembly. Input is near-upright; steep curves remain a detection limitation.
 use image::{GrayImage, RgbImage, imageops};
+use rayon::prelude::*;
 
 use crate::{Barline, Error, Observations, Point, Result, Staff, median, slope};
 
 mod bars;
 mod staff_edges;
+mod staff_smoothing;
 mod trace;
 use bars::bars;
 
@@ -359,16 +361,16 @@ fn staffs(ink: &Ink, sx: f64, sy: f64) -> Vec<Staff> {
             }
         }
     }
-    let mut out = vec![];
-    for track in tracks {
-        let (first, last) = (track[0].0, track[track.len() - 1].0);
-        if ((last - first) as f64) < (ink.w as f64 * 0.05) || track.len() < 4 {
-            continue;
-        }
-        if let Some(staff) = trace::staff(ink, &track, sx, sy) {
-            out.push(staff);
-        }
-    }
+    let mut out: Vec<Staff> = tracks
+        .into_par_iter()
+        .filter_map(|track| {
+            let (first, last) = (track[0].0, track[track.len() - 1].0);
+            if ((last - first) as f64) < (ink.w as f64 * 0.05) || track.len() < 4 {
+                return None;
+            }
+            trace::staff(ink, &track, sx, sy)
+        })
+        .collect();
     // Dense lyrics can complete a false, widely spaced five-line comb across
     // TWO real staves. Prefer long tracks measured in their own staff spaces,
     // then reject overlapping bands in the shared x interval. Distinct printed

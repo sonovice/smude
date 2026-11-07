@@ -61,12 +61,13 @@ fn components(mask: &[bool], width: usize, height: usize) -> Vec<Component> {
 
 /// Detect prose curves outside caller-supplied complete music regions. Bounds
 /// are XYXY in input pixels; callers should include lyrics, dynamics and slurs.
-/// Short isolated words and uncertain components intentionally yield no curve.
+/// Short words use an affine-smoothed local observation; long spans can also
+/// resolve curvature. Both contribute only over their measured support.
 pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<TextLine> {
     if gray.width() < 32 || gray.height() < 32 {
         return vec![];
     }
-    let scale = (1200. / f64::from(gray.width().max(gray.height()))).min(1.);
+    let scale = (1800. / f64::from(gray.width().max(gray.height()))).min(1.);
     let (w, h) = (
         (f64::from(gray.width()) * scale).round() as u32,
         (f64::from(gray.height()) * scale).round() as u32,
@@ -292,7 +293,7 @@ pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<
                 ((b[2] - b[0]) as f64 / (0.7 * (b[3] - b[1]) as f64)).max(1.)
             })
             .sum::<f64>();
-        if ids.len() < 3 || estimated_characters < 6. {
+        if ids.len() < 3 || estimated_characters < 3. {
             continue;
         }
         let members: Vec<_> = ids.iter().map(|i| &glyphs[*i]).collect();
@@ -307,7 +308,8 @@ pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<
                 .collect(),
         )
         .max(4.);
-        if ((z - a) as f64) < 5. * local_height || ((d - b) as f64) > 5. * local_height {
+        let curvature_supported = estimated_characters >= 6. && (z - a) as f64 >= 5. * local_height;
+        if ((z - a) as f64) < 2. * local_height || ((d - b) as f64) > 5. * local_height {
             continue;
         }
         let mut span_ink = vec![false; (z - a) * (d - b)];
@@ -340,7 +342,7 @@ pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<
                 y: center,
             });
         }
-        if samples.len() < 6 {
+        if samples.len() < if curvature_supported { 6 } else { 3 } {
             continue;
         }
         // Local affine smoothing suppresses character-shape jitter without
@@ -460,6 +462,30 @@ mod tests {
         }
         im
     }
+    #[test]
+    fn short_words_get_supported_local_observations() {
+        let mut im = GrayImage::from_pixel(240, 180, Luma([255]));
+        for (row, count) in [3, 4, 5].into_iter().enumerate() {
+            for letter in 0..count {
+                for yy in 0..10 {
+                    for xx in 0..6 {
+                        if xx == 0 || xx == 5 || yy == 0 || yy == 5 {
+                            im.put_pixel(
+                                20 + letter * 8 + xx,
+                                20 + row as u32 * 45 + yy,
+                                Luma([0]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let lines = detect_text_lines(&im, &[]);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines.iter().all(|line| line.points.len() >= 3));
+        assert!(detect_text_lines(&im, &[[10., 10., 100., 150.]]).is_empty());
+    }
+
     #[test]
     fn curved_paragraph_has_smooth_local_text_curves() {
         let lines = detect_text_lines(&paragraph(&[20]), &[]);

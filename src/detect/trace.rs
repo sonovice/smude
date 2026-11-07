@@ -152,7 +152,10 @@ fn fit(ink: &Ink, predicted: State) -> Option<(State, [f64; 5], usize)> {
     let mut measured: [Option<f64>; 5] = [None; 5];
     for k in -2..=2 {
         let mut centers = vec![];
-        for dx in [-4., -2., 0., 2., 4.] {
+        // Span several staff spaces so one notehead cannot dominate all
+        // run-centre measurements. Tangent alignment follows real page bends.
+        for fraction in [-1.5, -1., -0.5, 0., 0.5, 1., 1.5] {
+            let dx = fraction * best.d;
             let expected = best.h + f64::from(k) * best.d + best.m * dx;
             let y = expected.round() as i32;
             let near = (-reach..=reach)
@@ -325,7 +328,8 @@ pub(super) fn staff(ink: &Ink, track: &[(usize, [f64; 5])], sx: f64, sy: f64) ->
                 // one-pixel quantization. Refined local m remains the fallback.
                 let previous = data.iter().rev().nth(4).copied().unwrap_or((seed.x, ys));
                 if (next.x - previous.0).abs() > 6. {
-                    next.m = ((lines[2] - previous.1[2]) / (next.x - previous.0)).clamp(-1.3, 1.3);
+                    let previous_center = previous.1.iter().sum::<f64>() / 5.;
+                    next.m = ((next.h - previous_center) / (next.x - previous.0)).clamp(-1.3, 1.3);
                 }
                 let last_good = data.last().copied().unwrap_or((seed.x, ys));
                 for (x, rows) in &mut pending {
@@ -369,6 +373,7 @@ pub(super) fn staff(ink: &Ink, track: &[(usize, [f64; 5])], sx: f64, sy: f64) ->
     // Four true lines plus a beam can look like another five-line comb. Use
     // evidence over the ENTIRE track to select the actual five-line phase.
     correct_phase(ink, &mut left);
+    super::staff_smoothing::regularize(&mut left);
     let first = left[0].0;
     let last = left[left.len() - 1].0;
     if last - first < (ink.w as f64 * 0.05).max(12. * seed.d) {
@@ -451,6 +456,75 @@ pub(super) fn staff(ink: &Ink, track: &[(usize, [f64; 5])], sx: f64, sy: f64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn decorated_staff(curved: bool) -> (Ink, Vec<(usize, [f64; 5])>) {
+        let mut ink = Ink {
+            w: 700,
+            h: 280,
+            pixels: vec![0.; 700 * 280],
+            seed_paper: vec![true; 700 * 280],
+            allowed: None,
+        };
+        let center = |x: usize| {
+            130. + if curved {
+                7. * ((x as f64 - 50.) / 600. * std::f64::consts::PI).sin()
+            } else {
+                0.
+            }
+        };
+        for x in 30..670 {
+            for k in -2..=2 {
+                let y = (center(x) + k as f64 * 12.).round() as usize;
+                ink.pixels[y * ink.w + x] = 1.;
+            }
+        }
+        // Thin edge runs of a notehead can pass the broad-run rejection while
+        // pulling one line off the staff. The surrounding staff is unambiguous.
+        for (cx, k) in [(230, 1), (258, 2), (420, -1)] {
+            for x in cx - 9..=cx + 9 {
+                let y = (center(x) + k as f64 * 12.).round() as usize;
+                for yy in y..=y + 2 {
+                    ink.pixels[yy * ink.w + x] = 1.;
+                }
+            }
+        }
+        let track = (50..650)
+            .step_by(6)
+            .map(|x| {
+                (
+                    x,
+                    std::array::from_fn(|k| center(x) + (k as f64 - 2.) * 12.),
+                )
+            })
+            .collect();
+        (ink, track)
+    }
+
+    #[test]
+    fn notehead_edges_do_not_bend_staff_traces() {
+        for curved in [false, true] {
+            let (ink, track) = decorated_staff(curved);
+            let found = staff(&ink, &track, 1., 1.).unwrap();
+            let max_error = found
+                .x
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| **x > 100. && **x < 600.)
+                .flat_map(|(j, x)| (0..5).map(move |k| (j, *x, k)))
+                .map(|(j, x, k)| {
+                    let truth = 130.
+                        + (k as f64 - 2.) * 12.
+                        + if curved {
+                            7. * ((x - 50.) / 600. * std::f64::consts::PI).sin()
+                        } else {
+                            0.
+                        };
+                    (found.y[k][j] - truth).abs()
+                })
+                .fold(0_f64, f64::max);
+            assert!(max_error < 0.65, "curved={curved}, max error={max_error}");
+        }
+    }
+
     #[test]
     fn repeated_text_fragments_do_not_form_a_staff() {
         let mut ink = Ink {

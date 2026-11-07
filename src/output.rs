@@ -218,36 +218,54 @@ pub fn whiten_gray_border(
     protected: &[[f64; 4]],
 ) -> usize {
     let before = gray.clone();
-    let raw = GrayImage::from_fn(gray.width(), gray.height(), |x, y| {
-        let protected_pixel = protected.iter().any(|r| {
-            f64::from(x) >= r[0]
-                && f64::from(x) <= r[2]
-                && f64::from(y) >= r[1]
-                && f64::from(y) <= r[3]
+    let (w, h) = (gray.width() as usize, gray.height() as usize);
+    let protected_mask = protected_pixel_mask(w, h, protected);
+    let mut ink = vec![255; w * h];
+    ink.par_iter_mut()
+        .zip(gray.as_raw())
+        .zip(&protected_mask)
+        .for_each(|((out, tone), protected)| {
+            if *protected == 0 && *tone < 240 {
+                *out = 0;
+            }
         });
-        image::Luma([if !protected_pixel && gray.get_pixel(x, y)[0] < 240 {
-            0
-        } else {
-            255
-        }])
-    });
+    let raw = GrayImage::from_raw(gray.width(), gray.height(), ink).unwrap();
     let mut cleaned = raw.clone();
     whiten_page_border_impl(&mut cleaned, contour, margin, true, Some(gray.as_raw()));
     apply_binary_cleanup_with_contour(gray, &raw, &cleaned, contour);
-    let mut count = 0;
-    for (x, y, pixel) in gray.enumerate_pixels_mut() {
-        if protected.iter().any(|r| {
-            f64::from(x) >= r[0]
-                && f64::from(x) <= r[2]
-                && f64::from(y) >= r[1]
-                && f64::from(y) <= r[3]
-        }) {
-            *pixel = *before.get_pixel(x, y);
-        } else if *pixel != *before.get_pixel(x, y) {
-            count += 1;
+    gray.as_mut()
+        .par_iter_mut()
+        .zip(before.as_raw())
+        .zip(&protected_mask)
+        .map(|((pixel, before), protected)| {
+            if *protected != 0 {
+                *pixel = *before;
+            }
+            usize::from(*pixel != *before)
+        })
+        .sum()
+}
+
+/// Rasterize the union once instead of testing every pixel against every music
+/// rectangle twice. Inclusive float bounds match the original pixel predicate.
+fn protected_pixel_mask(w: usize, h: usize, protected: &[[f64; 4]]) -> Vec<u8> {
+    let mut mask = vec![0; w * h];
+    for r in protected {
+        if r.iter().any(|v| v.is_nan()) || r[0] > r[2] || r[1] > r[3] {
+            continue;
+        }
+        let x0 = r[0].ceil().clamp(0., w as f64) as usize;
+        let y0 = r[1].ceil().clamp(0., h as f64) as usize;
+        let x1 = (r[2].floor() + 1.).clamp(0., w as f64) as usize;
+        let y1 = (r[3].floor() + 1.).clamp(0., h as f64) as usize;
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0..y1 {
+            mask[y * w + x0..y * w + x1].fill(1);
         }
     }
-    count
+    mask
 }
 
 /// Capped Chebyshev distance seeded from the actual mapped perimeter. The
@@ -1038,6 +1056,27 @@ fn solid_triangle(pixels: &[usize], width: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rasterized_music_guards_match_inclusive_float_membership() {
+        let rectangles = [
+            [-2.5, 1.2, 12.8, 18.],
+            [8., 12., 30., 30.],
+            [34.1, -1., 38.9, 2.5],
+            [4., 4., 3., 7.],
+            [f64::NAN, 0., 50., 50.],
+            [0., 20., f64::INFINITY, 21.],
+        ];
+        let mask = super::protected_pixel_mask(40, 32, &rectangles);
+        for y in 0..32 {
+            for x in 0..40 {
+                let expected = rectangles.iter().any(|r| {
+                    x as f64 >= r[0] && x as f64 <= r[2] && y as f64 >= r[1] && y as f64 <= r[3]
+                });
+                assert_eq!(mask[y * 40 + x] != 0, expected, "{x}, {y}");
+            }
+        }
+    }
+
     use super::*;
     use image::Luma;
 

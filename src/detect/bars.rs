@@ -249,71 +249,80 @@ fn bridge(ink: &Ink, upper: &Candidate, lower: &Candidate) -> Option<(f64, Vec<P
 }
 
 pub(super) fn bars(ink: &Ink, staves: &[Staff], sx: f64, sy: f64) -> Vec<Barline> {
-    let mut candidates: Vec<Candidate> = vec![];
-    for (owner, staff) in staves.iter().enumerate() {
-        let mut scores = vec![];
-        // Endpoints can stop short of a terminal stroke when a clef or thick bar
-        // occludes horizontal evidence. Search only a small staff-scaled margin.
-        let space = (staff.y[4][0] - staff.y[0][0]) * sy / 4.;
-        let margin = 1.75 * space;
-        let left = (staff.x[0] * sx - margin).round().max(0.) as usize;
-        let right = (staff.x[staff.x.len() - 1] * sx + margin)
-            .round()
-            .min((ink.w - 1) as f64) as usize;
-        for x in left..=right {
-            let lines: [f64; 5] = std::array::from_fn(|k| {
-                crate::observations::interpolate(&staff.x, &staff.y[k], x as f64 / sx) * sy
-            });
-            let mid = (lines[0] + lines[4]) / 2.;
-            let mut best = (0_f64, 0_f64);
-            for j in -8..=8 {
-                let s = j as f64 * 0.025;
-                let mut all = 0_f64;
-                let mut minimum = 1_f64;
-                for k in 0..4 {
-                    let sum = (0..12)
-                        .map(|i| {
-                            let t = 0.2 + 0.6 * i as f64 / 11.;
-                            let y = lines[k] * (1. - t) + lines[k + 1] * t;
-                            ink.nearby(x as f64 + s * (y - mid), y)
-                        })
-                        .sum::<f64>()
-                        / 12.;
-                    minimum = minimum.min(sum);
-                    all += sum / 4.;
+    let per_staff: Vec<Vec<Candidate>> = staves
+        .par_iter()
+        .enumerate()
+        .map(|(owner, staff)| {
+            let mut candidates: Vec<Candidate> = vec![];
+            let mut scores = vec![];
+            // Endpoints can stop short of a terminal stroke when a clef or thick bar
+            // occludes horizontal evidence. Search only a small staff-scaled margin.
+            let space = (staff.y[4][0] - staff.y[0][0]) * sy / 4.;
+            let margin = 1.75 * space;
+            let left = (staff.x[0] * sx - margin).round().max(0.) as usize;
+            let right = (staff.x[staff.x.len() - 1] * sx + margin)
+                .round()
+                .min((ink.w - 1) as f64) as usize;
+            for x in left..=right {
+                let lines: [f64; 5] = std::array::from_fn(|k| {
+                    crate::observations::interpolate(&staff.x, &staff.y[k], x as f64 / sx) * sy
+                });
+                let mid = (lines[0] + lines[4]) / 2.;
+                let mut best = (0_f64, 0_f64);
+                for j in -8..=8 {
+                    let s = j as f64 * 0.025;
+                    let mut all = 0_f64;
+                    let mut minimum = 1_f64;
+                    for k in 0..4 {
+                        let sum = (0..12)
+                            .map(|i| {
+                                let t = 0.2 + 0.6 * i as f64 / 11.;
+                                let y = lines[k] * (1. - t) + lines[k + 1] * t;
+                                ink.nearby(x as f64 + s * (y - mid), y)
+                            })
+                            .sum::<f64>()
+                            / 12.;
+                        minimum = minimum.min(sum);
+                        all += sum / 4.;
+                    }
+                    if minimum >= 0.8 && (all > best.0 || (all == best.0 && s.abs() < best.1.abs()))
+                    {
+                        best = (all, s);
+                    }
                 }
-                if minimum >= 0.8 && (all > best.0 || (all == best.0 && s.abs() < best.1.abs())) {
-                    best = (all, s);
-                }
+                scores.push((best, lines[0], lines[4]));
             }
-            scores.push((best, lines[0], lines[4]));
-        }
-        for i in 0..scores.len() {
-            if scores[i].0.0 < 0.92
+            for i in 0..scores.len() {
+                if scores[i].0.0 < 0.92
                 || (i > 0 && scores[i].0.0 < scores[i - 1].0.0)
                 // Every tied peak must reach the stroke fit: choosing only
                 // the right edge of a broad plateau loses thin double bars
                 // and may pick a proposal whose pixel support is worse.
                 || (i + 1 < scores.len() && scores[i].0.0 < scores[i + 1].0.0)
-            {
-                continue;
-            }
-            let ((_, proposal), top, bottom) = scores[i];
-            if let Some(candidate) = stroke(ink, owner, top, bottom, (left + i) as f64, proposal) {
-                let center = median(candidate.bar.x.clone());
-                if candidates
-                    .iter()
-                    .filter(|c| c.bar.staff == owner)
-                    .all(|old| {
-                        (center - median(old.bar.x.clone())).abs()
-                            > candidate.width.max(old.width) * 0.5 + 0.5
-                    })
                 {
-                    candidates.push(candidate);
+                    continue;
+                }
+                let ((_, proposal), top, bottom) = scores[i];
+                if let Some(candidate) =
+                    stroke(ink, owner, top, bottom, (left + i) as f64, proposal)
+                {
+                    let center = median(candidate.bar.x.clone());
+                    if candidates
+                        .iter()
+                        .filter(|c| c.bar.staff == owner)
+                        .all(|old| {
+                            (center - median(old.bar.x.clone())).abs()
+                                > candidate.width.max(old.width) * 0.5 + 0.5
+                        })
+                    {
+                        candidates.push(candidate);
+                    }
                 }
             }
-        }
-    }
+            candidates
+        })
+        .collect();
+    let candidates: Vec<Candidate> = per_staff.into_iter().flatten().collect();
     // Alignment alone is not connectivity: stems on adjacent staves can have
     // the same x. Confirm narrow ink in the entire intervening whitespace.
     let mut links = vec![];
@@ -359,6 +368,15 @@ pub(super) fn bars(ink: &Ink, staves: &[Staff], sx: f64, sy: f64) -> Vec<Barline
             b.y.extend_from_slice(&candidates[j].bar.y);
             b.aligned_staffs.push(candidates[j].bar.staff);
             current = j;
+        }
+        // Smooth the complete connected stroke, including both staff/gap
+        // junctions. Keep genuine broad curvature instead of fitting a line.
+        let space = (c.bar.y.last().unwrap() - c.bar.y[0]) / 4.;
+        let measured: Vec<_> = b.y.iter().zip(&b.x).map(|(y, x)| (*y, [*x])).collect();
+        let mut smoothed = measured.clone();
+        super::staff_smoothing::smooth_curves(&measured, &mut smoothed, 3. * space, 0.25 * space);
+        for (x, (_, value)) in b.x.iter_mut().zip(smoothed) {
+            *x = value[0];
         }
         if b.x.iter().zip(&b.y).any(|(x, y)| !ink.permits(*x, *y)) {
             continue;
@@ -466,6 +484,29 @@ mod tests {
             result[0].x[middle] > 91.5,
             "measured gap curvature was flattened"
         );
+    }
+
+    #[test]
+    fn small_gap_ink_jitter_does_not_become_bar_curvature() {
+        let (mut ink, staves) = fixture(&[60., 130.]);
+        vertical(&mut ink, 90, 44, 146, 2);
+        for y in 78..114 {
+            if (y / 4) % 2 == 0 {
+                ink.pixels[y * ink.w + 92] = 1.;
+            }
+        }
+        let result = bars(&ink, &staves, 1., 1.);
+        assert_eq!(result.len(), 1);
+        let samples: Vec<_> = result[0]
+            .x
+            .iter()
+            .zip(&result[0].y)
+            .filter(|(_, y)| **y >= 85. && **y <= 108.)
+            .map(|(x, _)| *x)
+            .collect();
+        let span = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            - samples.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(span < 0.2, "gap jitter={span}");
     }
 
     #[test]

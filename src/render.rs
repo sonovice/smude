@@ -26,9 +26,13 @@ fn sample(image: &RgbImage, p: Point) -> [u8; 3] {
     }
     let (x, y) = (p.x.floor() as i64, p.y.floor() as i64);
     let mut sum = [0.; 3];
+    // Separable cubic weights: evaluate each of the eight taps once, rather
+    // than recomputing both polynomials for every one of the 16 source pixels.
+    let wx = [-1, 0, 1, 2].map(|i| weight(p.x - (x + i) as f64));
+    let wy = [-1, 0, 1, 2].map(|j| weight(p.y - (y + j) as f64));
     for j in -1..=2 {
         for i in -1..=2 {
-            let w = weight(p.x - (x + i) as f64) * weight(p.y - (y + j) as f64);
+            let w = wx[(i + 1) as usize] * wy[(j + 1) as usize];
             let (xx, yy) = (x + i, y + j);
             let pixel = if xx < 0
                 || yy < 0
@@ -130,12 +134,86 @@ impl Geometry {
             .enumerate()
             .for_each(|(j, row)| {
                 let y = y0 + (y1 - y0) * j as f64 / f64::from(height - 1);
+                let inverse = self.inverse_scanline(y);
                 for (i, pixel) in row.chunks_exact_mut(3).enumerate() {
                     let x = x0 + (x1 - x0) * i as f64 / f64::from(width - 1);
-                    pixel.copy_from_slice(&sample(image, self.inverse(Point { x, y })));
+                    pixel.copy_from_slice(&sample(image, inverse(x)));
                 }
             });
         RgbImage::from_raw(width, height, bytes)
             .ok_or(Error::Invalid("invalid rendered image buffer"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Barline, Config, Observations, Staff, TextLine};
+    #[test]
+    fn scanline_inverse_matches_general_composition_with_text_gcs_and_x_correction() {
+        let data = Observations {
+            width: 1000,
+            height: 700,
+            staves: [250., 400., 550.]
+                .into_iter()
+                .map(|center| Staff {
+                    x: vec![100., 300., 500., 700., 900.],
+                    y: std::array::from_fn(|k| {
+                        (0..5)
+                            .map(|j| center + (k as f64 - 2.) * 10. + 0.4 * (j as f64).sin())
+                            .collect()
+                    }),
+                })
+                .collect(),
+            barlines: (0..3)
+                .flat_map(|staff| {
+                    [150., 450., 850.].map(move |x| Barline {
+                        staff,
+                        x: vec![x, x + 2.4],
+                        y: vec![230. + 150. * staff as f64, 270. + 150. * staff as f64],
+                        aligned_staffs: vec![],
+                    })
+                })
+                .collect(),
+        };
+        for gcs in [false, true] {
+            let mut map = if gcs {
+                Geometry::fit_profiled_gcs(&data, &Config::default(), None, None, &[], true)
+                    .0
+                    .unwrap()
+            } else {
+                Geometry::fit(&data, &Config::default()).unwrap()
+            };
+            map.add_vertical_correction(&data).unwrap();
+            map.add_text_curves(
+                &[TextLine {
+                    points: (0..51)
+                        .map(|i| Point {
+                            x: 100. + i as f64 * 16.,
+                            y: 110. + 0.04 * i as f64 + 4. * (i as f64 / 12.).sin(),
+                        })
+                        .collect(),
+                    bounds: [100., 100., 900., 122.],
+                    block_id: 0,
+                    confidence: 0.9,
+                    uncertainty_pixels: 0.5,
+                }],
+                &[[80., 210., 920., 610.]],
+            );
+            for j in 0..241 {
+                let y = j as f64 * 3. - 12.5;
+                let inverse = map.inverse_scanline(y);
+                for i in 0..141 {
+                    let x = i as f64 * 7.2 - 7.5;
+                    let a = inverse(x);
+                    let b = map.inverse(Point { x, y });
+                    assert!(
+                        a.x.to_bits() == b.x.to_bits() || (a.x.is_nan() && b.x.is_nan()),
+                        "gcs={gcs}, {x}, {y}: {a:?} != {b:?}"
+                    );
+                    assert!(a.y.to_bits() == b.y.to_bits() || (a.y.is_nan() && b.y.is_nan()));
+                }
+            }
+        }
     }
 }

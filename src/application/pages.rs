@@ -229,7 +229,9 @@ pub(super) fn process_pages(
             let crop = crate::crop_page(&image, region)?;
             profile.source_crop_seconds = crop_started.elapsed().as_secs_f64();
             let write_started = Instant::now();
-            crop.save(dir.join("source.png"))?;
+            if args.diagnostics {
+                crop.save(dir.join("source.png"))?;
+            }
             profile.source_png_write_seconds = write_started.elapsed().as_secs_f64();
             profile.failure_stage = Some("analysis_perspective");
             let prep_started = Instant::now();
@@ -289,12 +291,14 @@ pub(super) fn process_pages(
                     "enabled": analysis_map.is_some(), "rejection": analysis_rejection,
                     "height_width_ratio": ratio, "coordinate_space": "original_page_crop_pixels",
                     "analysis_dimensions": analysis_map.as_ref().map(|m| m.dimensions()),
-                    "final_source": "source.png; analysis pixels are never used for final output"
+                    "final_source": "original full-resolution page crop; analysis pixels are never used for final output"
                 }))?,
             )?;
             if let (Some(map), Some(prepared)) = (&analysis_map, &prepared) {
                 let write_started = Instant::now();
-                prepared.save(dir.join("analysis.png"))?;
+                if args.diagnostics {
+                    prepared.save(dir.join("analysis.png"))?;
+                }
                 fs::write(
                     dir.join("analysis-map.json"),
                     serde_json::to_vec_pretty(map)?,

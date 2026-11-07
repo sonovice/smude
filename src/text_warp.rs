@@ -1,11 +1,12 @@
 //! Local text curvature residual with hard identity on protected music.
-use crate::{Point, TextLine, median};
+use crate::{Point, TextLine};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TextWarpReport {
     pub detected_lines: usize,
     pub accepted_blocks: usize,
+    pub fitted_lines: usize,
     pub max_displacement_pixels: f64,
     pub min_vertical_derivative: f64,
     pub music_identity: bool,
@@ -28,10 +29,12 @@ fn value(points: &[Point], x: f64) -> f64 {
     let (a, b) = (points[i - 1], points[i]);
     a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x)
 }
-struct Block {
-    lines: Vec<Vec<Point>>,
+struct Constraint {
+    residual: Vec<Point>,
     bounds: [f64; 4],
     pad: f64,
+    weight: f64,
+    block_id: usize,
 }
 impl TextWarp {
     pub fn fit(
@@ -39,69 +42,72 @@ impl TextWarp {
         protected: &[[f64; 4]],
         bounds: [f64; 4],
     ) -> (Option<Self>, TextWarpReport) {
-        let mut blocks = vec![];
-        let mut ids: Vec<_> = lines.iter().map(|l| l.block_id).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        for id in ids {
-            let group: Vec<_> = lines
-                .iter()
-                .filter(|l| l.block_id == id && l.confidence >= 0.25 && l.points.len() >= 5)
-                .collect();
-            if group.len() < 3 {
+        let mut constraints = vec![];
+        for line in lines {
+            let p = &line.points;
+            if p.len() < 3
+                || !line.confidence.is_finite()
+                || line.confidence <= 0.
+                || !line.uncertainty_pixels.is_finite()
+                || line.uncertainty_pixels < 0.
+                || line.bounds.iter().any(|v| !v.is_finite())
+                || p.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+                || p.windows(2).any(|q| q[1].x <= q[0].x)
+            {
                 continue;
             }
-            let mut b = [
-                f64::INFINITY,
-                f64::INFINITY,
-                f64::NEG_INFINITY,
-                f64::NEG_INFINITY,
-            ];
-            let mut curves = vec![];
-            for line in group {
-                let p = &line.points;
-                let mx = p.iter().map(|p| p.x).sum::<f64>() / p.len() as f64;
-                let my = p.iter().map(|p| p.y).sum::<f64>() / p.len() as f64;
-                let den = p.iter().map(|p| (p.x - mx).powi(2)).sum::<f64>();
-                if den <= 1. {
-                    continue;
-                }
-                let slope = p.iter().map(|p| (p.x - mx) * (p.y - my)).sum::<f64>() / den;
-                curves.push(
-                    p.iter()
-                        .map(|p| Point {
-                            x: p.x,
-                            y: my + slope * (p.x - mx) - p.y,
-                        })
-                        .collect::<Vec<_>>(),
-                );
-                for k in 0..2 {
-                    b[k] = b[k].min(line.bounds[k]);
-                    b[k + 2] = b[k + 2].max(line.bounds[k + 2]);
-                }
-            }
-            if curves.len() < 3 {
+            let height = line.bounds[3] - line.bounds[1];
+            let span = p.last().unwrap().x - p[0].x;
+            if height <= 0. || span <= 1. {
                 continue;
             }
-            let pad = ((b[3] - b[1]) * 0.5).max(12.);
-            blocks.push(Block {
-                lines: curves,
-                bounds: b,
-                pad,
+            // Each line has its own unknown vertical offset. Its departures
+            // from horizontal constrain only its observed span. In particular,
+            // a short word contributes local tilt, never an extrapolated page curve.
+            let mean_y = p.iter().map(|p| p.y).sum::<f64>() / p.len() as f64;
+            let variance = p.iter().map(|p| (p.y - mean_y).powi(2)).sum::<f64>() / p.len() as f64;
+            let noise = line.uncertainty_pixels.max(0.5);
+            // Ridge towards identity: small departures relative to measurement
+            // uncertainty have little influence, without a minimum word length.
+            let weight = line.confidence.clamp(0., 1.) / (line.confidence + 0.1) * variance
+                / (variance + noise * noise);
+            constraints.push(Constraint {
+                residual: p
+                    .iter()
+                    .map(|p| Point {
+                        x: p.x,
+                        y: mean_y - p.y,
+                    })
+                    .collect(),
+                bounds: [p[0].x, line.bounds[1], p.last().unwrap().x, line.bounds[3]],
+                pad: (height * 0.75).max(12.),
+                weight,
+                block_id: line.block_id,
             });
         }
+        let mut ids: Vec<_> = constraints.iter().map(|c| c.block_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
         let mut report = TextWarpReport {
             detected_lines: lines.len(),
-            accepted_blocks: blocks.len(),
+            fitted_lines: constraints.len(),
+            accepted_blocks: ids.len(),
             max_displacement_pixels: 0.,
             min_vertical_derivative: 1.,
             music_identity: true,
         };
-        if blocks.is_empty() {
+        if constraints.is_empty() {
             return (None, report);
         }
-        let w = 97;
-        let h = 145;
+        // Resolve small words without allocating a full-resolution displacement
+        // field. Grid density is bounded and independent of output resolution.
+        let min_span = constraints
+            .iter()
+            .map(|c| c.bounds[2] - c.bounds[0])
+            .fold(f64::INFINITY, f64::min);
+        let step = (min_span / 6.).max(1.);
+        let w = (((bounds[2] - bounds[0]) / step).ceil() as usize + 1).clamp(97, 257);
+        let h = (((bounds[3] - bounds[1]) / step).ceil() as usize + 1).clamp(145, 385);
         let dx = (bounds[2] - bounds[0]) / (w - 1) as f64;
         let dy = (bounds[3] - bounds[1]) / (h - 1) as f64;
         let mut values = vec![0.; w * h];
@@ -111,36 +117,28 @@ impl TextWarp {
                     x: bounds[0] + x as f64 * dx,
                     y: bounds[1] + y as f64 * dy,
                 };
-                // Expanding by one grid cell makes bilinear interpolation exactly zero
-                // throughout every protected rectangle, including its boundary.
+                // One grid cell of protection makes interpolated displacement
+                // exactly zero throughout the complete music guard.
                 if protected.iter().any(|r| {
                     p.x >= r[0] - dx && p.x <= r[2] + dx && p.y >= r[1] - dy && p.y <= r[3] + dy
                 }) {
                     continue;
                 }
-                let mut candidates = vec![];
-                for block in &blocks {
-                    let b = block.bounds;
-                    let wy = smooth((p.y - b[1] + block.pad) / block.pad)
-                        * smooth((b[3] + block.pad - p.y) / block.pad);
-                    if wy == 0. || p.x < b[0] || p.x > b[2] {
+                let (mut sum, mut weight) = (0., 0.25); // identity prior
+                for constraint in &constraints {
+                    let b = constraint.bounds;
+                    if p.x < b[0] || p.x > b[2] {
                         continue;
                     }
-                    let samples: Vec<_> = block
-                        .lines
-                        .iter()
-                        .filter(|l| p.x >= l[0].x && p.x <= l.last().unwrap().x)
-                        .map(|l| value(l, p.x))
-                        .collect();
-                    if samples.len() < 2 {
-                        continue;
-                    }
-                    let wx = smooth((p.x - b[0]) / block.pad) * smooth((b[2] - p.x) / block.pad);
-                    candidates.push(median(samples) * wx * wy);
+                    let pad = constraint.pad;
+                    let wy = smooth((p.y - b[1] + pad) / pad) * smooth((b[3] + pad - p.y) / pad);
+                    let x_pad = pad.min((b[2] - b[0]) * 0.2);
+                    let wx = smooth((p.x - b[0]) / x_pad) * smooth((b[2] - p.x) / x_pad);
+                    let local_weight = constraint.weight * wx * wy;
+                    sum += local_weight * value(&constraint.residual, p.x);
+                    weight += local_weight;
                 }
-                if !candidates.is_empty() {
-                    values[y * w + x] = median(candidates);
-                }
+                values[y * w + x] = sum / weight;
             }
         }
         // A global derivative bound includes transitions into music guards. It
@@ -207,6 +205,16 @@ impl TextWarp {
             y: p.y + self.row(p.x, j) * (1. - t) + self.row(p.x, j + 1) * t,
         }
     }
+    pub(crate) fn affects_row(&self, y: f64) -> bool {
+        if y < self.bounds[1] || y > self.bounds[3] {
+            return false;
+        }
+        let v = (y - self.bounds[1]) / (self.bounds[3] - self.bounds[1]) * (self.h - 1) as f64;
+        let j = (v.floor() as usize).min(self.h - 2);
+        self.values[j * self.w..(j + 2) * self.w]
+            .iter()
+            .any(|v| *v != 0.)
+    }
     pub fn inverse(&self, p: Point) -> Point {
         if self.forward(p).y == p.y {
             return p;
@@ -260,6 +268,42 @@ mod tests {
             .collect()
     }
     #[test]
+    fn a_single_short_word_contributes_with_uncertainty_and_local_support() {
+        let short = TextLine {
+            points: (0..9)
+                .map(|i| Point {
+                    x: 300. + i as f64 * 8.,
+                    y: 200. + i as f64,
+                })
+                .collect(),
+            bounds: [300., 194., 365., 218.],
+            block_id: 0,
+            confidence: 0.2,
+            uncertainty_pixels: 0.5,
+        };
+        let guard = [[0., 300., 1000., 550.]];
+        let (warp, report) =
+            TextWarp::fit(std::slice::from_ref(&short), &guard, [0., 0., 1000., 700.]);
+        let warp = warp.unwrap();
+        assert_eq!(report.fitted_lines, 1);
+        let a = short.points[2];
+        let b = short.points[6];
+        assert!(warp.forward(b).y - warp.forward(a).y < (b.y - a.y) * 0.8);
+        let mut uncertain = short.clone();
+        uncertain.uncertainty_pixels = 8.;
+        let (_, weak) = TextWarp::fit(&[uncertain], &guard, [0., 0., 1000., 700.]);
+        assert!(weak.max_displacement_pixels < report.max_displacement_pixels);
+        for point in [
+            Point { x: 100., y: 204. },
+            Point { x: 500., y: 204. },
+            Point { x: 330., y: 400. },
+        ] {
+            let q = warp.forward(point);
+            assert_eq!((q.x, q.y), (point.x, point.y));
+        }
+    }
+
+    #[test]
     fn text_curvature_improves_and_music_is_exact_identity() {
         let l = lines();
         let guards = [[0., 350., 1000., 550.]];
@@ -301,9 +345,9 @@ mod tests {
         }
     }
     #[test]
-    fn isolated_or_two_lines_cannot_enable_warp() {
+    fn one_or_two_supported_lines_can_constrain_local_geometry() {
         let mut l = lines();
         l.truncate(2);
-        assert!(TextWarp::fit(&l, &[], [0., 0., 1000., 700.]).0.is_none());
+        assert!(TextWarp::fit(&l, &[], [0., 0., 1000., 700.]).0.is_some());
     }
 }

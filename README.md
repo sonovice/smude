@@ -55,6 +55,11 @@ Page detection runs by default and creates separate outputs for a book spread:
 target/release/smude-v2 --image spread.jpg --out outputs/spread
 ```
 
+Normal processing writes only `rectified-clean.png` for each page, alongside
+measurement and timing reports. Use `--diagnostics` to also save the source and
+analysis images plus color, grayscale and binary output variants. The desktop
+app uses the normal output path.
+
 The release executable includes both page-detection models and statically linked
 ONNX Runtime. It needs no companion model files or ONNX Runtime installation.
 Normal operating-system libraries remain required.
@@ -91,24 +96,37 @@ The default pipeline is:
 1. Detect pages and prepare a bounded-resolution four-point analysis view when
    page mode supplies reliable corners and aspect ratio.
 2. Detect five-line staves, complete bar strokes and staff starts/ends. Restore
-   measurements to original-image coordinates.
+   measurements to original-image coordinates. Staff tracking uses wider
+   tangent-aligned ink probes and robust regression over staff-scaled windows
+   to suppress short symbol-induced wobbles while retaining broad page curvature.
+   Complete connected bar strokes are regularized across staff/gap junctions too.
 3. Fit calibrated GCS or an evidence-supported page plane, using five-line
-   equal spacing and the supplied paper aspect ratio.
+   equal spacing and the supplied paper aspect ratio. Repeated system boundaries
+   contribute shared-column evidence to this same camera fit, using observed
+   staff ends or continuous boundary bars. Both sides must be supported by at
+   least three common systems. Source-image consensus excludes
+   intentional first-system indents, short final systems and incompatible edges.
 4. Condition independent measurement noise, complete supported staff ends and
    flatten staff curves to horizontal, equally spaced lines.
 5. Apply bounded, evidence-gated x-only correction to barlines/system starts,
-   followed by local text correction outside protected music regions.
+   followed by local text correction outside protected music regions. Short words
+   contribute local slope observations too; confidence and measurement uncertainty
+   limit their influence to measured support. Text analysis uses at most 1800 pixels
+   on the long edge, independently of final output resolution.
 6. Sample the original RGB once, normalize grayscale contrast, remove confirmed
    paper rims and crop to the page with natural margins.
 
 Detection uses at most 1800 pixels in width by default.
 `--analysis-long-edge 1800` caps either orientation instead. Final reconstruction
-uses the original resolution.
+uses the original resolution. Rendering reuses row-dependent map coefficients
+without approximating the geometric inverse; staff tracing, bar proposals and
+endpoint measurement run in parallel. The app uses up to eight workers while
+reserving CPU capacity for its interface.
 
-The recommended output is `rectified-clean.png`, a high-contrast grayscale page
-on white paper. RGB, raw grayscale and strict Sauvola binary outputs are also
-written, along with observations, mapped overlays, fit diagnostics and individual
-stage profiles. Page mode writes one `page-*/` directory per accepted page.
+The default output is `rectified-clean.png`, a high-contrast grayscale page
+on white paper, plus observations, mapped geometry, fit diagnostics and individual
+stage profiles. Alternative image outputs require `--diagnostics`. Page mode
+writes one `page-*/` directory per accepted page.
 
 Use `--no-gcs`, `--no-vertical-correction` or `--no-text-dewarp` for ablations.
 `--no-perspective` selects staff flattening without the broad perspective/GCS

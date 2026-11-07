@@ -13,6 +13,7 @@ mod observations;
 mod perspective;
 mod staff_conditioning;
 mod staff_extensions;
+mod system_boundaries;
 mod vertical_correction;
 mod warp;
 
@@ -43,6 +44,7 @@ pub use staff_conditioning::{
     ConditioningReport, StaffConditioningReport, condition as condition_staff_observations,
 };
 pub use staff_extensions::{StaffEndpointRejection, StaffExtensionReport};
+pub use system_boundaries::BoundaryColumn;
 pub use vertical_correction::VerticalCorrection;
 pub use warp::{ExtrapolationReport, FitProfile, Geometry, Report, SystemReport, Validation};
 

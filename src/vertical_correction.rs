@@ -261,6 +261,18 @@ impl VerticalCorrection {
     pub fn jacobian_det(&self, p: Point) -> f64 {
         self.x_scale(p)
     }
+    /// All x coefficients depend only on output y, so rendering can reuse them
+    /// for the complete scanline without approximating the inverse map.
+    #[cfg(feature = "render")]
+    pub(crate) fn inverse_row(&self, y: f64) -> Option<(f64, f64, f64)> {
+        self.bands
+            .iter()
+            .find(|b| y > b.support[0] && y < b.support[1])
+            .map(|b| {
+                let (a, scale_delta) = b.displacement(y);
+                (b.center.x, 1. + scale_delta, a)
+            })
+    }
     pub fn inverse(&self, p: Point) -> Point {
         self.bands
             .iter()

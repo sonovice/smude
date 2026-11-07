@@ -105,7 +105,8 @@ fn manual_pages_keep_successful_sibling_and_explicit_failed_page() {
         report["pages"][1]["source_bounds"],
         json!([700, 0, 1400, 500])
     );
-    assert!(out.join("page-left/rectified.png").exists());
+    assert!(out.join("page-left/rectified-clean.png").exists());
+    assert!(!out.join("page-left/rectified.png").exists());
     let page_report: Value =
         serde_json::from_slice(&fs::read(out.join("page-left/report.json")).unwrap()).unwrap();
     assert_eq!(page_report["final_crop_mode"], "page");
@@ -113,7 +114,7 @@ fn manual_pages_keep_successful_sibling_and_explicit_failed_page() {
         page_report["output_size"],
         page_report["uncropped_output_size"]
     );
-    assert!(out.join("page-right/source.png").exists());
+    assert!(!out.join("page-right/source.png").exists());
     assert!(out.join("page-right/error.log").exists());
     assert!(!out.join("rectified.png").exists());
     assert!(!out.join("page-right/rectified.png").exists());
@@ -136,6 +137,7 @@ fn all_failed_pages_leave_diagnostics_and_fail_the_command() {
     let out = fixture.0.join("result");
     let status = Command::new(env!("CARGO_BIN_EXE_smude-v2"))
         .args([
+            "--diagnostics",
             "--image",
             input.to_str().unwrap(),
             "--out",

@@ -71,7 +71,7 @@ impl Shear {
     }
 }
 
-fn systems(data: &Observations) -> Vec<Vec<usize>> {
+pub(crate) fn systems(data: &Observations) -> Vec<Vec<usize>> {
     let n = data.staves.len();
     let mut counts = vec![0_usize; n];
     let mut matched = vec![vec![0_usize; n]; n];
@@ -811,6 +811,25 @@ impl Geometry {
         let p = self.pre_gcs.as_ref().map_or(p, |m| m.inverse(p));
         p
     }
+    /// Hoist exactly y-dependent stages out of the pixel loop. Rows touched by
+    /// text retain the general inverse because text can change y locally.
+    #[cfg(feature = "render")]
+    pub(crate) fn inverse_scanline(&self, y: f64) -> impl Fn(f64) -> Point + '_ {
+        let text = self.text.as_ref().is_some_and(|text| text.affects_row(y));
+        let vertical = self.vertical.inverse_row(y);
+        let shear = self.horizontal.at(y);
+        move |x| {
+            if text {
+                return self.inverse(Point { x, y });
+            }
+            let x = vertical.map_or(x, |(center, scale, a)| center + (x - center) * scale + a);
+            let p = self
+                .projective
+                .inverse(self.flat.inverse(Point { x: x - shear, y }));
+            self.pre_gcs.as_ref().map_or(p, |m| m.inverse(p))
+        }
+    }
+
     /// Fit the bounded common x field after horizontal flattening. This never
     /// changes output y and is composed before any protected text residual.
     pub fn add_vertical_correction(&mut self, data: &Observations) -> Result<()> {

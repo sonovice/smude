@@ -3,6 +3,7 @@
 use super::Ink;
 use crate::observations::{StaffEdge, StaffEdgeSide};
 use crate::{Observations, Point, Staff, median};
+use rayon::prelude::*;
 
 fn course(staff: &Staff, k: usize, x: f64, sx: f64, sy: f64, d: f64) -> f64 {
     let lo = staff.x[0];
@@ -200,40 +201,49 @@ fn edge_line(edge: &StaffEdge) -> (Point, f64) {
 }
 
 pub(super) fn detect(ink: &Ink, data: &Observations, sx: f64, sy: f64) -> Vec<StaffEdge> {
-    let mut edges = vec![];
-    for (i, staff) in data.staves.iter().enumerate() {
-        for side in [StaffEdgeSide::Start, StaffEdgeSide::End] {
-            let endpoint = if side == StaffEdgeSide::Start {
-                0
-            } else {
-                staff.x.len() - 1
-            };
-            let d = (staff.y[4][endpoint] - staff.y[0][endpoint]) * sy / 4.;
-            if d < 2. {
-                continue;
+    let per_staff: Vec<Vec<StaffEdge>> = data
+        .staves
+        .par_iter()
+        .enumerate()
+        .map(|(i, staff)| {
+            let mut edges = vec![];
+            for side in [StaffEdgeSide::Start, StaffEdgeSide::End] {
+                let endpoint = if side == StaffEdgeSide::Start {
+                    0
+                } else {
+                    staff.x.len() - 1
+                };
+                let d = (staff.y[4][endpoint] - staff.y[0][endpoint]) * sy / 4.;
+                if d < 2. {
+                    continue;
+                }
+                let points: Vec<_> = (0..5)
+                    .filter_map(|k| {
+                        line_end(ink, staff, k, side, sx, sy, d).map(|(p, c)| (k, p, c))
+                    })
+                    .collect();
+                let points = coherent(&points, d / sy);
+                // Three adjacent lines provide only half the staff's lever arm:
+                // a brace foot can mimic their endpoints. Require observations
+                // spanning most of the original five-line band.
+                if points.len() < 3 || points.last().unwrap().0 - points[0].0 < 3 {
+                    continue;
+                }
+                let confidence = points.iter().map(|p| p.2).sum::<f64>() / points.len() as f64
+                    * (points.len() as f64 / 5.).sqrt();
+                edges.push(StaffEdge {
+                    staff: i,
+                    side,
+                    points: points.iter().map(|p| p.1).collect(),
+                    line_indices: points.iter().map(|p| p.0).collect(),
+                    confidence,
+                    aligned_staffs: vec![],
+                });
             }
-            let points: Vec<_> = (0..5)
-                .filter_map(|k| line_end(ink, staff, k, side, sx, sy, d).map(|(p, c)| (k, p, c)))
-                .collect();
-            let points = coherent(&points, d / sy);
-            // Three adjacent lines provide only half the staff's lever arm:
-            // a brace foot can mimic their endpoints. Require observations
-            // spanning most of the original five-line band.
-            if points.len() < 3 || points.last().unwrap().0 - points[0].0 < 3 {
-                continue;
-            }
-            let confidence = points.iter().map(|p| p.2).sum::<f64>() / points.len() as f64
-                * (points.len() as f64 / 5.).sqrt();
-            edges.push(StaffEdge {
-                staff: i,
-                side,
-                points: points.iter().map(|p| p.1).collect(),
-                line_indices: points.iter().map(|p| p.0).collect(),
-                confidence,
-                aligned_staffs: vec![],
-            });
-        }
-    }
+            edges
+        })
+        .collect();
+    let mut edges: Vec<_> = per_staff.into_iter().flatten().collect();
     // Alignment is a geometric relation requiring BOTH observed boundaries.
     // Shared end x alone would join indented examples or unrelated columns.
     for i in 0..data.staves.len() {

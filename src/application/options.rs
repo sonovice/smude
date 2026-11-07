@@ -22,6 +22,9 @@ pub enum CropMode {
 }
 
 pub struct Options {
+    /// Write source/analysis images and alternate output images for diagnosis.
+    /// Normal processing writes only the final paper-white image.
+    pub diagnostics: bool,
     /// Optional live detection observer; events use original-image coordinates.
     pub progress: Option<super::ProgressObserver>,
     /// Existing Smude barlines.json in original-image pixels.
@@ -116,6 +119,7 @@ impl Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            diagnostics: false,
             progress: None,
             geometry: None,
             geometry_corners: None,

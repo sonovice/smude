@@ -58,9 +58,17 @@ fn cli_content_crop_keeps_output_pixels_and_geometry_consistent() {
             .output()
             .unwrap()
     };
-    let run = call(&out, &["--crop-mode", "content"]);
+    let run = call(&out, &["--crop-mode", "content", "--diagnostics"]);
     let default = root.join("page-default");
     assert!(call(&default, &[]).status.success());
+    assert!(default.join("rectified-clean.png").exists());
+    for name in [
+        "rectified.png",
+        "rectified-gray.png",
+        "rectified-binary.png",
+    ] {
+        assert!(!default.join(name).exists());
+    }
     let default_report: Value =
         serde_json::from_slice(&fs::read(default.join("report.json")).unwrap()).unwrap();
     assert_eq!(default_report["final_crop_mode"], "page");
@@ -98,7 +106,11 @@ fn cli_content_crop_keeps_output_pixels_and_geometry_consistent() {
     assert_eq!(report["output_size"][0], rgb.width());
     assert_eq!(report["output_size"][1], rgb.height());
     let uncropped = root.join("uncropped");
-    assert!(call(&uncropped, &["--no-final-crop"]).status.success());
+    assert!(
+        call(&uncropped, &["--no-final-crop", "--diagnostics"])
+            .status
+            .success()
+    );
     let full_rgb = image::open(uncropped.join("rectified.png"))
         .unwrap()
         .to_rgb8();
