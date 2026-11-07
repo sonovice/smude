@@ -7,8 +7,9 @@ description = "Native GCS and staff-driven sheet music rectification"
 license = "LicenseRef-Commons-Clause-AGPL-3.0"
 
 [features]
-default = ["cli", "onnx-pages"]
+default = ["cli", "onnx-pages", "gpu-render"]
 render = ["dep:image", "dep:rayon"]
+gpu-render = ["render", "dep:wgpu", "dep:bytemuck", "dep:pollster"]
 application = ["render", "dep:serde_json"]
 cli = ["application", "dep:clap"]
 onnx-pages = ["render", "dep:onnx-runtime"]
@@ -21,14 +22,30 @@ rayon = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 onnx-runtime = { package = "ort", version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-native", "api-31"], optional = true }
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl"], optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
 
-# The published Apple/Windows runtime archives include these providers.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["metal"], optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan"], optional = true }
+
+# Select matching published runtime archives for each platform.
 # Session initialization still explicitly prefers the CPU.
 [target.'cfg(target_os = "macos")'.dependencies]
 onnx-runtime = { package = "ort", version = "=2.0.0-rc.15", default-features = false, features = ["coreml"], optional = true }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+onnx-runtime = { package = "ort", version = "=2.0.0-rc.15", default-features = false, features = ["coreml"], optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+onnx-runtime = { package = "ort", version = "=2.0.0-rc.15", default-features = false, features = ["nnapi"], optional = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 onnx-runtime = { package = "ort", version = "=2.0.0-rc.15", default-features = false, features = ["directml", "copy-dylibs"], optional = true }
+wgpu = { version = "30", default-features = false, features = ["dx12"], optional = true }
 
 [dev-dependencies]
 serde_json = "1"
@@ -39,6 +56,6 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [workspace]
-members = ["gui"]
+members = ["gui", "mobile/src-tauri", "mobile/device"]
 default-members = ["."]
 resolver = "2"

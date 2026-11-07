@@ -8,7 +8,7 @@ mod progress;
 pub use preview_map::PreviewMap;
 pub use progress::{DetectionProgress, DetectionStage, ProgressObserver};
 
-use crate::Observations;
+use crate::geometry::Observations;
 pub use options::{CropMode, Options, PageLayout, SpreadLayout};
 use pages::process_pages;
 use process::process;
@@ -62,6 +62,7 @@ pub struct Settings {
     pub page_layout: PageLayout,
     pub spread_layout: SpreadLayout,
     pub text_correction: bool,
+    pub render_backend: crate::rendering::RenderBackend,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -70,6 +71,7 @@ impl Default for Settings {
             page_layout: PageLayout::Auto,
             spread_layout: SpreadLayout::SideBySide,
             text_correction: true,
+            render_backend: crate::rendering::RenderBackend::Auto,
         }
     }
 }
@@ -97,6 +99,7 @@ pub fn process_file_with_progress(
         page_layout: settings.page_layout,
         spread_layout: settings.spread_layout,
         no_text_dewarp: !settings.text_correction,
+        render_backend: settings.render_backend,
         ..Options::default()
     })
 }
@@ -114,6 +117,17 @@ pub fn run(args: &Options) -> Result<ProcessingResult, Box<dyn std::error::Error
         .is_some_and(|r| !r.is_finite() || !(0.1..=10.).contains(&r))
     {
         return Err("page aspect must be finite in 0.1..10".into());
+    }
+    #[cfg(feature = "gpu-render")]
+    if !args.no_render
+        && !args.detect_only
+        && args.render_backend != crate::rendering::RenderBackend::Cpu
+        && image::image_dimensions(&args.image).is_ok_and(|(w, h)| {
+            u64::from(w) * u64::from(h) >= 1_000_000
+                || args.render_backend == crate::rendering::RenderBackend::Gpu
+        })
+    {
+        crate::rendering::gpu::prewarm();
     }
     if args.uses_page_mode() {
         if args.same_size.is_some() || args.probe_points.is_some() {
@@ -142,8 +156,9 @@ pub fn run(args: &Options) -> Result<ProcessingResult, Box<dyn std::error::Error
             source = Some(decoded?);
             profile.failure_stage = Some("native_detection");
             let start = Instant::now();
-            let on_staves = |staves: &[crate::Staff]| args.emit_staves("1", staves, |p| p);
-            let detected = crate::detect::detect_masked(
+            let on_staves =
+                |staves: &[crate::geometry::Staff]| args.emit_staves("1", staves, |p| p);
+            let detected = crate::detection::music::detect_masked(
                 source.as_ref().unwrap(),
                 args.analysis_width_for(source.as_ref().unwrap()),
                 None,

@@ -22,6 +22,13 @@ pub(super) enum CropMode {
     Content,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(super) enum RenderBackend {
+    Auto,
+    Cpu,
+    Gpu,
+}
+
 #[derive(Parser)]
 #[command(
     name = "smude-v2",
@@ -103,6 +110,9 @@ pub(super) struct Args {
     pub(super) size_prior: f64,
     #[arg(long)]
     pub(super) no_render: bool,
+    /// Offscreen image renderer; auto uses GPU for large output rasters.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub(super) render_backend: RenderBackend,
     /// Export native classical detections without fitting or rendering.
     #[arg(long)]
     pub(super) detect_only: bool,
@@ -168,6 +178,11 @@ impl From<Args> for smude_geometry::application::Options {
             same_size: args.same_size,
             size_prior: args.size_prior,
             no_render: args.no_render,
+            render_backend: match args.render_backend {
+                RenderBackend::Auto => smude_geometry::RenderBackend::Auto,
+                RenderBackend::Cpu => smude_geometry::RenderBackend::Cpu,
+                RenderBackend::Gpu => smude_geometry::RenderBackend::Gpu,
+            },
             detect_only: args.detect_only,
             analysis_long_edge: args.analysis_long_edge,
             analysis_width: args.analysis_width,

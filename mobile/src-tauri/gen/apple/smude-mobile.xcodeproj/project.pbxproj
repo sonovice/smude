@@ -1,0 +1,586 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0D618854831B5080F64DBA5F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2B183AC3965205EF27F785B9 /* Assets.xcassets */; };
+		1476B9BA5456667182A0D769 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = B08293645CED2EBF720346EC /* assets */; };
+		23768282A04023E291D6DBFA /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 561B47C8E1B6C3C2DB100B3A /* LaunchScreen.storyboard */; };
+		2895F9AF400856D4363B3A1B /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5CA7090A19B3A9256B45DDB2 /* UIKit.framework */; };
+		3223F857F285A143DC1F750D /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 946212F9F7D8EBC291008F8F /* Security.framework */; };
+		3D5CA5B818B1F50DAC75CACF /* SmudeMobileUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92D6A4251D4F278CBFB6B314 /* SmudeMobileUITests.swift */; };
+		8FFA686507E3D8A9C9595AB3 /* libapp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 15D975EFA8B6C392D284E183 /* libapp.a */; };
+		9F70D78C76167DDE54825586 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7D16BBAB3079D575A95BDDCE /* WebKit.framework */; };
+		C011CC343ACF9C98029501F8 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FE9790ABAC6E9A023A1A6A2F /* MetalKit.framework */; };
+		E225E83152139C14FA534979 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 74418E27988EA206C980745F /* Metal.framework */; };
+		E7A3D827F8D8D40F1A70D897 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7227CD04CF92968218BAC43B /* QuartzCore.framework */; };
+		F227B659FBC632D7710220FC /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9EEFEDC422D8D4F615CCBA44 /* CoreGraphics.framework */; };
+		F37DBF0F3BC6EFA14E0AF524 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = 67A910764279EE617A90938F /* main.mm */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		4D2C89A945A1923D7C09A7BD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F28892A1E1427E1928F86437 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F4FA44CCEA7D8BA4C25660A1;
+			remoteInfo = "smude-mobile_iOS";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		15D975EFA8B6C392D284E183 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		2B183AC3965205EF27F785B9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		462FEF4AB54FF595161A03AC /* smude-mobile_iOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "smude-mobile_iOS.entitlements"; sourceTree = "<group>"; };
+		542D0CF9AEC7C8F6B189E130 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
+		5440815833B073592B387392 /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
+		561B47C8E1B6C3C2DB100B3A /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		5CA7090A19B3A9256B45DDB2 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		67A910764279EE617A90938F /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
+		7227CD04CF92968218BAC43B /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		74418E27988EA206C980745F /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		7D16BBAB3079D575A95BDDCE /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
+		92D6A4251D4F278CBFB6B314 /* SmudeMobileUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmudeMobileUITests.swift; sourceTree = "<group>"; };
+		946212F9F7D8EBC291008F8F /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		9A738DCA2749E422874BD460 /* smude-mobile_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "smude-mobile_iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		9EEFEDC422D8D4F615CCBA44 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
+		ADCAFBB284460EC46090A06B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		B08293645CED2EBF720346EC /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
+		D943E1210B1CDA7DBE2047E5 /* lib.rs */ = {isa = PBXFileReference; path = lib.rs; sourceTree = "<group>"; };
+		E65095025F5A79276977ACC7 /* smude-mobileUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = "smude-mobileUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		FE9790ABAC6E9A023A1A6A2F /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F39FF141499F9ED1F89028E4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8FFA686507E3D8A9C9595AB3 /* libapp.a in Frameworks */,
+				F227B659FBC632D7710220FC /* CoreGraphics.framework in Frameworks */,
+				E225E83152139C14FA534979 /* Metal.framework in Frameworks */,
+				C011CC343ACF9C98029501F8 /* MetalKit.framework in Frameworks */,
+				E7A3D827F8D8D40F1A70D897 /* QuartzCore.framework in Frameworks */,
+				3223F857F285A143DC1F750D /* Security.framework in Frameworks */,
+				2895F9AF400856D4363B3A1B /* UIKit.framework in Frameworks */,
+				9F70D78C76167DDE54825586 /* WebKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		226D49731B85CB3FD43FD0C4 /* src */ = {
+			isa = PBXGroup;
+			children = (
+				D943E1210B1CDA7DBE2047E5 /* lib.rs */,
+				5440815833B073592B387392 /* main.rs */,
+			);
+			name = src;
+			path = ../../src;
+			sourceTree = "<group>";
+		};
+		486153A3A4A3AB1E43FAEF19 /* bindings */ = {
+			isa = PBXGroup;
+			children = (
+				542D0CF9AEC7C8F6B189E130 /* bindings.h */,
+			);
+			path = bindings;
+			sourceTree = "<group>";
+		};
+		4B063AE7F7B401D7970AF80E /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				5729FB6A672F0085E23E79ED /* smude-mobile */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		4D2861C454B5AB807E30CE79 = {
+			isa = PBXGroup;
+			children = (
+				B08293645CED2EBF720346EC /* assets */,
+				2B183AC3965205EF27F785B9 /* Assets.xcassets */,
+				561B47C8E1B6C3C2DB100B3A /* LaunchScreen.storyboard */,
+				B2941B9A6D8218AD5DF6CE4B /* Externals */,
+				D58DB5D809EABE568482421E /* smude-mobile_iOS */,
+				4B063AE7F7B401D7970AF80E /* Sources */,
+				226D49731B85CB3FD43FD0C4 /* src */,
+				AFBFB05B12016A30B3974BEC /* UITests */,
+				87C1BA14514D9A4FDDFEB10E /* Frameworks */,
+				4D79E2AB8D7F1A4CA86BA347 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		4D79E2AB8D7F1A4CA86BA347 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				9A738DCA2749E422874BD460 /* smude-mobile_iOS.app */,
+				E65095025F5A79276977ACC7 /* smude-mobileUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		5729FB6A672F0085E23E79ED /* smude-mobile */ = {
+			isa = PBXGroup;
+			children = (
+				67A910764279EE617A90938F /* main.mm */,
+				486153A3A4A3AB1E43FAEF19 /* bindings */,
+			);
+			path = "smude-mobile";
+			sourceTree = "<group>";
+		};
+		87C1BA14514D9A4FDDFEB10E /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				9EEFEDC422D8D4F615CCBA44 /* CoreGraphics.framework */,
+				15D975EFA8B6C392D284E183 /* libapp.a */,
+				74418E27988EA206C980745F /* Metal.framework */,
+				FE9790ABAC6E9A023A1A6A2F /* MetalKit.framework */,
+				7227CD04CF92968218BAC43B /* QuartzCore.framework */,
+				946212F9F7D8EBC291008F8F /* Security.framework */,
+				5CA7090A19B3A9256B45DDB2 /* UIKit.framework */,
+				7D16BBAB3079D575A95BDDCE /* WebKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		AFBFB05B12016A30B3974BEC /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				92D6A4251D4F278CBFB6B314 /* SmudeMobileUITests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+		B2941B9A6D8218AD5DF6CE4B /* Externals */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Externals;
+			sourceTree = "<group>";
+		};
+		D58DB5D809EABE568482421E /* smude-mobile_iOS */ = {
+			isa = PBXGroup;
+			children = (
+				ADCAFBB284460EC46090A06B /* Info.plist */,
+				462FEF4AB54FF595161A03AC /* smude-mobile_iOS.entitlements */,
+			);
+			path = "smude-mobile_iOS";
+			sourceTree = "<group>";
+		};
+		"TEMP_81DD6D42-4D74-4ABF-A825-4F29A39BBC3E" /* x86_64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = x86_64;
+			sourceTree = "<group>";
+		};
+		"TEMP_B0FE2D49-C73A-4A1F-8B94-56D86311348C" /* arm64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = arm64;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		024DE16535155B08BBFD7E2D /* smude-mobileUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DA3D36856A5F1A94D75FEEED /* Build configuration list for PBXNativeTarget "smude-mobileUITests" */;
+			buildPhases = (
+				F39E0A7B79776141D55665B9 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DE9D163A9C04A8051ED5A758 /* PBXTargetDependency */,
+			);
+			name = "smude-mobileUITests";
+			packageProductDependencies = (
+			);
+			productName = "smude-mobileUITests";
+			productReference = E65095025F5A79276977ACC7 /* smude-mobileUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		F4FA44CCEA7D8BA4C25660A1 /* smude-mobile_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 036B2474D714B327B7BB71AA /* Build configuration list for PBXNativeTarget "smude-mobile_iOS" */;
+			buildPhases = (
+				03B6DC856263770D03EA23B7 /* Build Rust Code */,
+				EE798B1AB9A390EAA6C79EEC /* Sources */,
+				8D64C315C31D6FDDAECC5697 /* Resources */,
+				F39FF141499F9ED1F89028E4 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "smude-mobile_iOS";
+			packageProductDependencies = (
+			);
+			productName = "smude-mobile_iOS";
+			productReference = 9A738DCA2749E422874BD460 /* smude-mobile_iOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F28892A1E1427E1928F86437 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					024DE16535155B08BBFD7E2D = {
+						DevelopmentTeam = 76CP95AA8F;
+						TestTargetID = F4FA44CCEA7D8BA4C25660A1;
+					};
+					F4FA44CCEA7D8BA4C25660A1 = {
+						DevelopmentTeam = 76CP95AA8F;
+					};
+				};
+			};
+			buildConfigurationList = F99C4C3EFA8097274E33FB24 /* Build configuration list for PBXProject "smude-mobile" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 4D2861C454B5AB807E30CE79;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4D79E2AB8D7F1A4CA86BA347 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F4FA44CCEA7D8BA4C25660A1 /* smude-mobile_iOS */,
+				024DE16535155B08BBFD7E2D /* smude-mobileUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		8D64C315C31D6FDDAECC5697 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0D618854831B5080F64DBA5F /* Assets.xcassets in Resources */,
+				23768282A04023E291D6DBFA /* LaunchScreen.storyboard in Resources */,
+				1476B9BA5456667182A0D769 /* assets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		03B6DC856263770D03EA23B7 /* Build Rust Code */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust Code";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a",
+				"$(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ \"${SMUDE_UI_TEST_REUSE_RUST:-0}\" = \"1\" ]; then\n  test -f \"${SRCROOT}/Externals/arm64/${CONFIGURATION}/libapp.a\" || exit 1\n  exit 0\nfi\nnpm run -- tauri ios xcode-script -v --platform \"${PLATFORM_DISPLAY_NAME:?}\" --sdk-root \"${SDKROOT:?}\" --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration \"${CONFIGURATION:?}\" ${FORCE_COLOR} ${ARCHS:?}\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		EE798B1AB9A390EAA6C79EEC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F37DBF0F3BC6EFA14E0AF524 /* main.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F39E0A7B79776141D55665B9 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3D5CA5B818B1F50DAC75CACF /* SmudeMobileUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		DE9D163A9C04A8051ED5A758 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F4FA44CCEA7D8BA4C25660A1 /* smude-mobile_iOS */;
+			targetProxy = 4D2C89A945A1923D7C09A7BD /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		402033D53CB9C8586854DBA9 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = release;
+		};
+		711C4235CAC10584094658CD /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = debug;
+		};
+		7484A97B3E72ED5E366A1B68 /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "smude-mobile_iOS/smude-mobile_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = "76CP95AA8F";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "smude-mobile_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.gridnotelabs.smude.mobile;
+				PRODUCT_NAME = "Smude";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+			};
+			name = release;
+		};
+		7A2889F948C2314617B3BEB1 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				DEVELOPMENT_TEAM = 76CP95AA8F;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.gridnotelabs.smude.mobile.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "smude-mobile_iOS";
+			};
+			name = debug;
+		};
+		BC3715415FD70D2E042CDBE0 /* debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ARCHS = (
+					arm64,
+				);
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "smude-mobile_iOS/smude-mobile_iOS.entitlements";
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = "76CP95AA8F";
+				ENABLE_BITCODE = NO;
+				"EXCLUDED_ARCHS[sdk=iphoneos*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				INFOPLIST_FILE = "smude-mobile_iOS/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.gridnotelabs.smude.mobile;
+				PRODUCT_NAME = "Smude";
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALID_ARCHS = arm64;
+			};
+			name = debug;
+		};
+		E32F85D6A9BA4113A1695FFB /* release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				DEVELOPMENT_TEAM = 76CP95AA8F;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.gridnotelabs.smude.mobile.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "smude-mobile_iOS";
+			};
+			name = release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		036B2474D714B327B7BB71AA /* Build configuration list for PBXNativeTarget "smude-mobile_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BC3715415FD70D2E042CDBE0 /* debug */,
+				7484A97B3E72ED5E366A1B68 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		DA3D36856A5F1A94D75FEEED /* Build configuration list for PBXNativeTarget "smude-mobileUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7A2889F948C2314617B3BEB1 /* debug */,
+				E32F85D6A9BA4113A1695FFB /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+		F99C4C3EFA8097274E33FB24 /* Build configuration list for PBXProject "smude-mobile" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				711C4235CAC10584094658CD /* debug */,
+				402033D53CB9C8586854DBA9 /* release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = F28892A1E1427E1928F86437 /* Project object */;
+}

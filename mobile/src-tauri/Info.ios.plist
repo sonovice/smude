@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>
+<key>NSPhotoLibraryUsageDescription</key><string>Notenbilder zur lokalen Entzerrung auswählen.</string>
+<key>NSCameraUsageDescription</key><string>Notenseiten fotografieren und lokal entzerren.</string>
+<key>UIFileSharingEnabled</key><true/>
+<key>LSSupportsOpeningDocumentsInPlace</key><true/>
+</dict></plist>

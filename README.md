@@ -42,6 +42,111 @@ The desktop UI ports Wing Companion's typography, icon set, widgets, palette,
 card gradients and background effects. Font and icon licences are included in
 `gui/assets/fonts/` and available in the app's Info dialog.
 
+## GPU image generation
+
+CLI, desktop and mobile share the same GPU renderer, enabled by the default
+`gpu-render` feature. It uses Metal on Apple devices, Vulkan on Android/Linux
+and DirectX 12 on Windows. Automatic selection uses the GPU for final rasters
+of at least one megapixel; analysis previews retain the CPU reference sampler.
+GPU initialization overlaps detection. Page-model inference remains on the CPU.
+
+```sh
+# Automatic GPU selection and CPU fallback (default):
+target/release/smude-v2 --image page.jpg --out outputs/page
+# Force a backend for a reproducible comparison:
+target/release/smude-v2 --image page.jpg --out outputs/page --render-backend cpu
+# GPU errors are explicit when forced:
+target/release/smude-v2 --image page.jpg --out outputs/page --render-backend gpu
+# Build without GPU support:
+cargo build --release --no-default-features --features cli,onnx-pages
+```
+
+The renderer evaluates the existing inverse geometry on an adaptive map, refines
+curved cells and uses exact pixel coordinates at the finest level. Independent
+probes enforce a sampled 0.005-source-pixel interpolation tolerance; this is not
+an analytic bound between probes. Bicubic sampling, grayscale and paper-white
+normalization run together on the GPU. Border cleanup also uses exact GPU
+Chebyshev distance fields; Android retains the faster parallel CPU distance
+transform after device profiling. Border content decisions remain unchanged. Small pixel
+differences from CPU floating-point arithmetic are expected.
+
+Each page's `profile.json` records the actual adapter, backend, fallback reason,
+map construction, transfers, GPU timestamps when available and border-distance
+calls. GPU `render_seconds` includes grayscale and paper normalization; their
+separate CPU stage counters are zero in this path. Compare the whole output
+stage as well as total processing time. Automatic mode falls back to CPU when
+GPU initialization, resource limits or rendering fail.
+
+## Android and iOS device test
+
+`mobile/` is a separate Tauri application using the same Rust engine, embedded
+models and native ONNX Runtime. No server is required on the phone. JPEG/PNG
+and HEIC/HEIF import, native camera capture, automatic page detection,
+full-resolution rectification, preview and PNG export are implemented. HEIC uses
+ImageIO on iOS and ImageDecoder on Android, applies orientation once and writes
+lossless PNG without reducing the source resolution. Native HEIC/camera decoding
+accepts up to 64 megapixels and a 12000-pixel longest edge.
+Phone EXIF orientation is normalized before detection; ordinary imports retain
+the original file bytes. The displayed duration includes import and decoding the
+result preview; `mobile-report.json` records the engine duration and per-stage
+profiles separately.
+
+On macOS, install Xcode, Node, Android SDK/NDK, Java 21, XcodeGen, CocoaPods and
+`xz`. Supply the model files described below for source builds. Then:
+
+```sh
+rustup target add aarch64-linux-android aarch64-apple-ios aarch64-apple-ios-sim
+cd mobile
+npm ci
+# Set ANDROID_HOME, NDK_HOME and JAVA_HOME to the installed toolchains.
+# Opt-in local test signing and sandbox access; Rust still builds optimized:
+ORG_GRADLE_PROJECT_smudeDeviceTest=true npm run tauri android build --apk --target aarch64
+# Override the signing team when building with another developer account:
+APPLE_DEVELOPMENT_TEAM=76CP95AA8F npm run tauri ios build --export-method debugging
+```
+
+Native projects are under `mobile/src-tauri/gen/`. Build outputs, generated
+schemas and native libraries are ignored. The build hook prewarms Cargo's mobile
+ONNX Runtime cache using checksum-verified archives matching the pinned `ort`
+version; it does not put runtime binaries in the repository. The providers in
+those archives are included for compatibility; inference currently uses CPU on
+both platforms, as on desktop. Device acceleration is benchmarked explicitly,
+including ONNX node placement and coordinate parity; a registered provider is
+not treated as proof of GPU/NPU execution.
+
+For the existing device test, place `test-input.jpg` in the Android app data
+root or the iOS app's Documents directory. The app then exposes **Testbild
+verwenden**. Android's private `run-test-once` marker or the iOS launch environment
+`SMUDE_AUTORUN=1` runs it once automatically. Source photos are not bundled.
+For renderer comparisons, set `SMUDE_RENDER_BACKEND=cpu|gpu|auto` in the iOS
+launch environment, or put that value in Android app data file `render-backend`.
+Remove the file after testing to restore automatic selection.
+Device reports and PNGs are stored below the app's cache `processing/job-*`.
+To compare CPU against the platform ONNX provider, add an Android app-data marker
+`benchmark-models`, or launch iOS with `SMUDE_BENCH_MODELS=1`, then process a test
+image. `processing/model-benchmark/report.json` records four runs, initialization,
+node execution providers, coordinate differences and explicit backend errors.
+This diagnostic does not change the production backend. On iOS,
+`SMUDE_COREML_UNITS=gpu` excludes the Neural Engine (`cpu` selects CoreML CPU;
+otherwise all units are allowed). The device check retains CPU as the default:
+the CPU/GPU CoreML path meets the fixture coordinate tolerance but is slower,
+while the all-units path fails parity and the tested Android NNAPI device rejects
+the model. These are device observations, not claims about every phone.
+The iOS UI export test
+uses `SMUDE_VERIFY_EXPORT=1` to read the actual provider destination and compare
+its bytes against the completed PNG before reporting success. Its result and
+SHA-256 are written to `processing/last-export.json`.
+
+After a Tauri iOS release build, the included native UI test can reuse the built
+Rust library. It requires an unlocked, paired device with UI automation enabled:
+
+```sh
+xcodebuild test -project src-tauri/gen/apple/smude-mobile.xcodeproj \
+  -scheme smude-mobileUITests -configuration release \
+  -destination 'id=YOUR_DEVICE_UDID' -allowProvisioningUpdates \
+  SMUDE_UI_TEST_REUSE_RUST=1
+```
+
 ## Run
 
 ```sh
@@ -153,9 +258,23 @@ claims. Model weights, datasets and generated images are not committed.
 | Path | Purpose |
 | --- | --- |
 | `Cargo.toml`, `Cargo.lock` | Rust crate and locked dependencies |
-| `src/` | Native geometry, detection, rendering and CLI |
+| `src/detection/` | Page regions/models, music tracking and text observations |
+| `src/geometry/` | Observation types, page models, residual corrections and reversible fit |
+| `src/rendering/` | CPU/GPU reconstruction, tone preparation, borders and final crop |
+| `src/application/` | Shared file workflow, progress, profiles and preview mapping |
+| `src/cli/` | Command-line arguments and entry point |
 | `tests/` | Rust regressions and required fixture |
 | `gui/` | egui/eframe desktop app, preview and export |
+| `mobile/` | Tauri mobile app and native device integrations |
+
+The library exposes `geometry`, `detection`, `rendering` and `application` as
+separate modules. Existing root-level imports remain supported. Geometry models
+and residual corrections are grouped under `geometry/models/` and
+`geometry/corrections/`; `geometry/fit/` composes them. Rendering owns both
+backends and `rendering/output/` handles tone, distance fields, page borders and
+crop bounds. Its processed images never become detector input. `lib.rs` contains
+module declarations and public re-exports; shared errors and numerical helpers
+live in `error.rs` and the private `math.rs`.
 
 Git ignores local assets, build products and generated results. Historical
 Python code, research prototypes, synthetic generation and old development

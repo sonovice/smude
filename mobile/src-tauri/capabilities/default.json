@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "default",
+  "description": "Image selection and local processing in the main window",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}

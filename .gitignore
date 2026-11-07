@@ -1,5 +1,20 @@
 # Rust build products
 /target/
+/mobile/node_modules/
+/mobile/dist/
+/mobile/src-tauri/gen/android/.gradle/
+/mobile/src-tauri/gen/android/.kotlin/
+/mobile/src-tauri/gen/android/build/
+/mobile/src-tauri/gen/android/app/build/
+/mobile/src-tauri/gen/android/app/src/main/jniLibs/
+/mobile/src-tauri/gen/apple/build/
+/mobile/src-tauri/gen/apple/Externals/
+/mobile/src-tauri/gen/schemas/
+/mobile/device/.tauri/
+/mobile/device/ios/.build/
+/mobile/device/ios/Package.resolved
+*.xcuserstate
+xcuserdata/
 
 # Local model weights and runtime assets
 /models/

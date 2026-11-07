@@ -7,7 +7,7 @@ license = "LicenseRef-Commons-Clause-AGPL-3.0"
 description = "Desktop app for sheet music rectification"
 
 [dependencies]
-smude-geometry = { path = "..", default-features = false, features = ["application", "onnx-pages"] }
+smude-geometry = { path = "..", default-features = false, features = ["application", "onnx-pages", "gpu-render"] }
 eframe = { version = "0.36.2", default-features = false, features = ["x11", "wayland", "default_fonts", "persistence", "accesskit"] }
 epaint_default_fonts = "0.36.2"
 rfd = "0.17"

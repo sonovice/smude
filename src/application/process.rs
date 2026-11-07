@@ -1,16 +1,15 @@
 //! Single-page fit, composed rendering and output diagnostics.
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    time::Instant,
-};
-
-use crate::{Config, Geometry, Observations, Point};
+use crate::geometry::{Config, Geometry, Observations, Point};
 use image::{
     ImageEncoder,
     codecs::png::{CompressionType, FilterType, PngEncoder},
 };
 use serde::Serialize;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use super::{
     options::{CropMode, Options},
@@ -33,7 +32,7 @@ pub(super) struct ProcessSummary {
 #[derive(Clone, Copy)]
 pub(super) struct PageOutput<'a> {
     pub(super) ratio: Option<f64>,
-    pub(super) region: &'a crate::PageRegion,
+    pub(super) region: &'a crate::detection::PageRegion,
     pub(super) corners: Option<[Point; 4]>,
     pub(super) analysis_dimensions: Option<[u32; 2]>,
     pub(super) camera_center: Point,
@@ -182,7 +181,7 @@ pub(super) fn process(
             }
             region
         });
-        crate::detect_staff_edges_with_region_mask(
+        crate::detection::detect_staff_edges_with_region_mask(
             image,
             data,
             args.analysis_width_for(image),
@@ -303,7 +302,7 @@ pub(super) fn process(
     #[derive(Serialize)]
     struct MappedEdge {
         staff: usize,
-        side: crate::StaffEdgeSide,
+        side: crate::geometry::StaffEdgeSide,
         points: Vec<Point>,
         line_indices: Vec<usize>,
         confidence: f64,
@@ -388,7 +387,8 @@ pub(super) fn process(
             (f64::from(raster_height) * scale).round().max(2.) as u32,
         );
         let analysis = geometry.render_at_dimensions(source, aw, ah)?;
-        let analysis = crate::normalize_paper(&image::imageops::grayscale(&analysis));
+        let analysis =
+            crate::rendering::output::normalize_paper(&image::imageops::grayscale(&analysis));
         profile.text_analysis_render_seconds = started.elapsed().as_secs_f64();
         let to_analysis = |p: Point| Point {
             x: (p.x - x0) * f64::from(aw - 1) / (x1 - x0),
@@ -407,7 +407,7 @@ pub(super) fn process(
             })
             .collect();
         let started = Instant::now();
-        text_lines = crate::detect_text_lines(&analysis, &guards);
+        text_lines = crate::detection::detect_text_lines(&analysis, &guards);
         profile.text_detection_seconds = started.elapsed().as_secs_f64();
         for line in &mut text_lines {
             line.points.iter_mut().for_each(|p| *p = from_analysis(*p));
@@ -558,25 +558,39 @@ pub(super) fn process(
         };
         profile.failure_stage = Some("render");
         let start = Instant::now();
-        let rendered = geometry.render_with_aspect(&source, canvas_height_width_ratio);
+        let rendered = geometry.render_prepared(
+            &source,
+            raster_width,
+            raster_height,
+            args.render_backend,
+            true,
+            args.diagnostics,
+        );
         let seconds = start.elapsed().as_secs_f64();
         profile.render_seconds = seconds;
-        let mut result = rendered?;
+        let rendered = rendered?;
+        profile.renderer = Some(rendered.profile);
+        let mut result = rendered.color;
         let output_start = Instant::now();
-        profile.failure_stage = Some("grayscale");
-        let gray_start = Instant::now();
-        let mut gray = image::imageops::grayscale(&result);
-        profile.grayscale_seconds = gray_start.elapsed().as_secs_f64();
-        profile.failure_stage = Some("binarization");
-        let binary_start = Instant::now();
-        let mut binary = crate::binarize_sauvola(&gray);
+        let (mut gray, mut binary, mut clean) = if let Some(tones) = rendered.tones {
+            tones
+        } else {
+            profile.failure_stage = Some("grayscale");
+            let gray_start = Instant::now();
+            let gray = image::imageops::grayscale(result.as_ref().unwrap());
+            profile.grayscale_seconds = gray_start.elapsed().as_secs_f64();
+            profile.failure_stage = Some("binarization");
+            let binary_start = Instant::now();
+            let binary = crate::rendering::output::binarize_sauvola(&gray);
+            profile.binarization_seconds = binary_start.elapsed().as_secs_f64();
+            profile.failure_stage = Some("print_normalization");
+            let print_start = Instant::now();
+            let clean = crate::rendering::output::normalize_paper(&gray);
+            profile.print_normalization_seconds = print_start.elapsed().as_secs_f64();
+            (gray, binary, clean)
+        };
         let raw_binary = binary.clone();
-        profile.binarization_seconds = binary_start.elapsed().as_secs_f64();
-        profile.failure_stage = Some("print_normalization");
-        let print_start = Instant::now();
-        let mut clean = crate::normalize_paper(&gray);
         let normalized_before_cleanup = args.diagnostics.then(|| clean.clone());
-        profile.print_normalization_seconds = print_start.elapsed().as_secs_f64();
         let mut border_removed_pixels = 0;
         let mut border_margin_pixels = 0;
         if let Some(contour) = mapped_page_contour
@@ -588,14 +602,19 @@ pub(super) fn process(
                 * args.binary_page_margin)
                 .round()
                 .max(1.) as u32;
-            border_removed_pixels =
-                crate::whiten_page_border(&mut binary, contour, border_margin_pixels);
+            let border = crate::rendering::output::PageBorder::new(contour).with_gpu(
+                profile
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|r| r.backend == "gpu"),
+            );
+            border_removed_pixels = border.whiten_binary(&mut binary, border_margin_pixels);
             profile.binary_border_seconds = border_started.elapsed().as_secs_f64();
             let print_border_start = Instant::now();
-            crate::apply_binary_cleanup_with_contour(&mut clean, &raw_binary, &binary, contour);
-            crate::whiten_gray_border(
+            border.clean_gray(
                 &mut clean,
-                contour,
+                &raw_binary,
+                &binary,
                 border_margin_pixels,
                 &mapped.protected_music,
             );
@@ -614,10 +633,17 @@ pub(super) fn process(
                 }
             }
             profile.print_border_seconds = print_border_start.elapsed().as_secs_f64();
+            if let Some(renderer) = &mut profile.renderer {
+                (
+                    renderer.gpu_border_distance_calls,
+                    renderer.gpu_border_distance_seconds,
+                    renderer.gpu_border_fallback_reason,
+                ) = border.gpu_stats();
+            }
         }
         profile.failure_stage = Some("print_antialias");
         let antialias_start = Instant::now();
-        clean = crate::antialias_print(&clean);
+        clean = crate::rendering::output::antialias_print(&clean);
         profile.print_antialias_seconds = antialias_start.elapsed().as_secs_f64();
         profile.failure_stage = Some("final_crop");
         let crop_started = Instant::now();
@@ -625,8 +651,8 @@ pub(super) fn process(
             let padding =
                 (f64::from(binary.width().min(binary.height())) * args.crop_padding).round() as u32;
             final_crop = match args.crop_mode {
-                CropMode::Content => crate::content_crop(&binary, padding),
-                CropMode::Page => crate::page_crop(
+                CropMode::Content => crate::rendering::output::content_crop(&binary, padding),
+                CropMode::Page => crate::rendering::output::page_crop(
                     mapped_page_contour.as_deref().unwrap_or(&[]),
                     raster_width,
                     raster_height,
@@ -636,7 +662,9 @@ pub(super) fn process(
             let [x, y, w, h] = final_crop;
             if final_crop != [0, 0, raster_width, raster_height] {
                 if args.diagnostics {
-                    result = image::imageops::crop_imm(&result, x, y, w, h).to_image();
+                    result = Some(
+                        image::imageops::crop_imm(result.as_ref().unwrap(), x, y, w, h).to_image(),
+                    );
                     gray = image::imageops::crop_imm(&gray, x, y, w, h).to_image();
                     binary = image::imageops::crop_imm(&binary, x, y, w, h).to_image();
                 }
@@ -647,6 +675,7 @@ pub(super) fn process(
         profile.failure_stage = Some("png_write");
         let png_start = Instant::now();
         if args.diagnostics {
+            let result = result.as_ref().unwrap();
             let file = fs::File::create(out.join("rectified.png"))?;
             PngEncoder::new_with_quality(file, CompressionType::Default, FilterType::Adaptive)
                 .write_image(
@@ -733,7 +762,7 @@ pub(super) fn process(
     profile.geometry_export_seconds += export_started.elapsed().as_secs_f64();
     #[derive(Serialize)]
     struct Run<'a> {
-        geometry: &'a crate::Report,
+        geometry: &'a crate::geometry::Report,
         output_height_width_ratio: Option<f64>,
         render_canvas_height_width_ratio: Option<f64>,
         output_size: [u32; 2],

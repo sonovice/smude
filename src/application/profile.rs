@@ -29,6 +29,7 @@ pub(super) struct StepProfile {
     pub(super) failed_fit_stage_seconds: f64,
     pub(super) geometry_export_seconds: f64,
     pub(super) render_seconds: f64,
+    pub(super) renderer: Option<crate::rendering::RenderProfile>,
     pub(super) grayscale_seconds: f64,
     pub(super) binarization_seconds: f64,
     pub(super) print_normalization_seconds: f64,

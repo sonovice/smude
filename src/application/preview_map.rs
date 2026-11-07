@@ -1,5 +1,6 @@
 //! Exact final-raster ↔ original-photo coordinates for linked previews.
-use crate::{Geometry, PageRegion, Point};
+use crate::detection::PageRegion;
+use crate::geometry::{Geometry, Point};
 
 #[derive(Clone, Debug)]
 pub struct PreviewMap {
@@ -95,7 +96,7 @@ fn finite(p: Point) -> Option<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, Observations, Staff};
+    use crate::geometry::{Config, Observations, Staff};
     #[test]
     fn nonlinear_music_mapping_roundtrips_with_source_offset_aspect_and_crop() {
         let data = Observations {

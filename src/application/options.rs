@@ -73,6 +73,7 @@ pub struct Options {
     pub same_size: Option<String>,
     pub size_prior: f64,
     pub no_render: bool,
+    pub render_backend: crate::rendering::RenderBackend,
     /// Export native classical detections without fitting or rendering.
     pub detect_only: bool,
     /// Optional analysis long-edge cap. Default policy remains max width 1800.
@@ -146,6 +147,7 @@ impl Default for Options {
             same_size: None,
             size_prior: 1.,
             no_render: false,
+            render_backend: crate::rendering::RenderBackend::Auto,
             detect_only: false,
             analysis_long_edge: None,
             analysis_width: None,

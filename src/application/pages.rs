@@ -1,7 +1,8 @@
 //! Page detection and independent per-page processing.
+use crate::detection::PageRegions;
 use std::{fs, path::PathBuf, time::Instant};
 
-use crate::{PageRegions, Point};
+use crate::geometry::Point;
 use serde::Serialize;
 
 #[cfg(feature = "onnx-pages")]
@@ -50,19 +51,19 @@ fn automatic_regions(
     {
         let started = Instant::now();
         let detector = if let Some(directory) = &args.page_models {
-            crate::PageDetector::load(directory)?
+            crate::detection::PageDetector::load(directory)?
         } else {
-            crate::PageDetector::embedded()?
+            crate::detection::PageDetector::embedded()?
         };
         let model_load_seconds = started.elapsed().as_secs_f64();
         let layout = match args.page_layout {
-            PageLayout::Auto => crate::PageLayoutMode::Auto,
-            PageLayout::Single => crate::PageLayoutMode::Single,
-            PageLayout::Double => crate::PageLayoutMode::Double,
+            PageLayout::Auto => crate::detection::PageLayoutMode::Auto,
+            PageLayout::Single => crate::detection::PageLayoutMode::Single,
+            PageLayout::Double => crate::detection::PageLayoutMode::Double,
         };
         let spread_layout = match args.spread_layout {
-            SpreadLayout::SideBySide => crate::PageSpreadLayout::SideBySide,
-            SpreadLayout::Stacked => crate::PageSpreadLayout::Stacked,
+            SpreadLayout::SideBySide => crate::detection::PageSpreadLayout::SideBySide,
+            SpreadLayout::Stacked => crate::detection::PageSpreadLayout::Stacked,
         };
         let (regions, detection) =
             detector.detect_with_spread_layout(image, layout, spread_layout)?;
@@ -226,7 +227,7 @@ pub(super) fn process_pages(
         let mut profile = StepProfile::start();
         let result = (|| -> Result<ProcessSummary, Box<dyn std::error::Error>> {
             let crop_started = Instant::now();
-            let crop = crate::crop_page(&image, region)?;
+            let crop = crate::detection::crop_page(&image, region)?;
             profile.source_crop_seconds = crop_started.elapsed().as_secs_f64();
             let write_started = Instant::now();
             if args.diagnostics {
@@ -246,7 +247,7 @@ pub(super) fn process_pages(
                 .zip(ratio)
                 .filter(|_| !args.no_analysis_perspective)
                 .and_then(|(corners, ratio)| {
-                    crate::PageAnalysisMap::new(
+                    crate::geometry::PageAnalysisMap::new(
                         crop.width(),
                         crop.height(),
                         corners,
@@ -268,7 +269,7 @@ pub(super) fn process_pages(
                 .transpose()?;
             let analysis_region = analysis_map.as_ref().map(|map| {
                 let [ox, oy, _, _] = region.bounds();
-                crate::PageRegion {
+                crate::detection::PageRegion {
                     id: region.id.clone(),
                     contour: region
                         .contour
@@ -316,7 +317,7 @@ pub(super) fn process_pages(
                     x: p.x + f64::from(ox),
                     y: p.y + f64::from(oy),
                 };
-                let on_staves = |staves: &[crate::Staff]| {
+                let on_staves = |staves: &[crate::geometry::Staff]| {
                     args.emit_staves(&region.id, staves, |p| {
                         let p = if use_prepared {
                             analysis_map.as_ref().unwrap().inverse(p).unwrap_or(Point {
@@ -331,7 +332,7 @@ pub(super) fn process_pages(
                 };
                 let detected = if use_prepared {
                     let prepared = prepared.as_ref().unwrap();
-                    crate::detect::detect_masked(
+                    crate::detection::music::detect_masked(
                         prepared,
                         prepared.width(),
                         analysis_region.as_ref(),
@@ -339,8 +340,8 @@ pub(super) fn process_pages(
                     )
                     .and_then(|data| analysis_map.as_ref().unwrap().observations_to_source(&data))
                 } else {
-                    let local = crate::detect::local_region(region, ox, oy);
-                    crate::detect::detect_masked(
+                    let local = crate::detection::music::local_region(region, ox, oy);
+                    crate::detection::music::detect_masked(
                         &crop,
                         args.analysis_width_for(&crop),
                         Some(&local),

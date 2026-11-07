@@ -1,0 +1,28 @@
+[package]
+name = "smude-mobile"
+version = "2.0.0-alpha.1"
+edition = "2024"
+publish = false
+license = "LicenseRef-Commons-Clause-AGPL-3.0"
+description = "Android and iOS device test for the shared Smude engine"
+
+[lib]
+name = "smude_mobile"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-smude-device = { path = "../device" }
+smude-geometry = { path = "../..", default-features = false, features = ["application", "onnx-pages", "gpu-render"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

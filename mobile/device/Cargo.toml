@@ -1,0 +1,14 @@
+[package]
+name = "tauri-plugin-smude-device"
+version = "0.1.0"
+edition = "2024"
+publish = false
+links = "tauri-plugin-smude-device"
+license = "LicenseRef-Commons-Clause-AGPL-3.0"
+
+[dependencies]
+tauri = { version = "2" }
+serde_json = "1"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

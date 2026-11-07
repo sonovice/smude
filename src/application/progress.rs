@@ -1,5 +1,5 @@
 //! Detection progress in untouched, full-resolution input-image coordinates.
-use crate::{Point, Staff};
+use crate::geometry::{Point, Staff};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
