@@ -404,7 +404,7 @@ fn staffs(ink: &Ink, sx: f64, sy: f64) -> Vec<Staff> {
 
 /// Native image-to-observations baseline. No external Python/OMR dependency.
 pub fn detect(image: &RgbImage, max_width: u32) -> Result<Observations> {
-    detect_masked(image, max_width, None)
+    detect_masked(image, max_width, None, None)
 }
 
 // Rasterize scanline intersections once. Testing a several-hundred-vertex page
@@ -474,7 +474,7 @@ pub fn crop_page(image: &RgbImage, region: &crate::PageRegion) -> Result<RgbImag
     Ok(crop)
 }
 
-fn local_region(region: &crate::PageRegion, x0: u32, y0: u32) -> crate::PageRegion {
+pub(crate) fn local_region(region: &crate::PageRegion, x0: u32, y0: u32) -> crate::PageRegion {
     let mut local = region.clone();
     for p in &mut local.contour {
         p.x -= f64::from(x0);
@@ -508,7 +508,7 @@ pub fn detect_cropped_page(
         ));
     }
     let local = local_region(region, x0, y0);
-    detect_masked(crop, max_width, Some(&local))
+    detect_masked(crop, max_width, Some(&local), None)
 }
 
 /// Detect with a mask already expressed in image pixels, without cropping or
@@ -518,13 +518,16 @@ pub fn detect_with_region_mask(
     region: &crate::PageRegion,
     max_width: u32,
 ) -> Result<Observations> {
-    detect_masked(image, max_width, Some(region))
+    detect_masked(image, max_width, Some(region), None)
 }
 
-fn detect_masked(
+type StaffObserver<'a> = dyn Fn(&[Staff]) + 'a;
+
+pub(crate) fn detect_masked(
     image: &RgbImage,
     max_width: u32,
     region: Option<&crate::PageRegion>,
+    on_staves: Option<&StaffObserver<'_>>,
 ) -> Result<Observations> {
     if max_width < 64 || image.width() < 64 || image.height() < 64 {
         return Err(Error::Invalid(
@@ -561,6 +564,9 @@ fn detect_masked(
     let staves = staffs(&ink, sx, sy);
     if staves.is_empty() {
         return Err(Error::Invalid("no reliable five-line staves found"));
+    }
+    if let Some(observer) = on_staves {
+        observer(&staves);
     }
     let barlines = bars(&ink, &staves, sx, sy);
     let data = Observations {

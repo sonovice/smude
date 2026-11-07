@@ -1,13 +1,13 @@
 //! Page detection and independent per-page processing.
 use std::{fs, path::PathBuf, time::Instant};
 
+use crate::{PageRegions, Point};
 use serde::Serialize;
-use smude_geometry::{PageRegions, Point};
 
 #[cfg(feature = "onnx-pages")]
-use super::args::{PageLayout, SpreadLayout};
+use super::options::{PageLayout, SpreadLayout};
 use super::{
-    args::Args,
+    options::Options,
     process::{PageOutput, ProcessSummary, process},
     profile::{StepProfile, finish_profile},
 };
@@ -43,26 +43,26 @@ struct PagesRun {
 }
 
 fn automatic_regions(
-    args: &Args,
+    args: &Options,
     image: &image::RgbImage,
 ) -> Result<PageRegions, Box<dyn std::error::Error>> {
     #[cfg(feature = "onnx-pages")]
     {
         let started = Instant::now();
         let detector = if let Some(directory) = &args.page_models {
-            smude_geometry::PageDetector::load(directory)?
+            crate::PageDetector::load(directory)?
         } else {
-            smude_geometry::PageDetector::embedded()?
+            crate::PageDetector::embedded()?
         };
         let model_load_seconds = started.elapsed().as_secs_f64();
         let layout = match args.page_layout {
-            PageLayout::Auto => smude_geometry::PageLayoutMode::Auto,
-            PageLayout::Single => smude_geometry::PageLayoutMode::Single,
-            PageLayout::Double => smude_geometry::PageLayoutMode::Double,
+            PageLayout::Auto => crate::PageLayoutMode::Auto,
+            PageLayout::Single => crate::PageLayoutMode::Single,
+            PageLayout::Double => crate::PageLayoutMode::Double,
         };
         let spread_layout = match args.spread_layout {
-            SpreadLayout::SideBySide => smude_geometry::PageSpreadLayout::SideBySide,
-            SpreadLayout::Stacked => smude_geometry::PageSpreadLayout::Stacked,
+            SpreadLayout::SideBySide => crate::PageSpreadLayout::SideBySide,
+            SpreadLayout::Stacked => crate::PageSpreadLayout::Stacked,
         };
         let (regions, detection) =
             detector.detect_with_spread_layout(image, layout, spread_layout)?;
@@ -84,7 +84,9 @@ fn automatic_regions(
     }
 }
 
-pub(super) fn process_pages(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn process_pages(
+    args: &Options,
+) -> Result<super::ProcessingResult, Box<dyn std::error::Error>> {
     let run_started = Instant::now();
     fs::create_dir_all(&args.out)?;
     let decode_started = Instant::now();
@@ -116,6 +118,15 @@ pub(super) fn process_pages(args: &Args) -> Result<(), Box<dyn std::error::Error
     }
     if (regions.width, regions.height) != image.dimensions() {
         return Err("page-region dimensions differ from input image".into());
+    }
+    for region in &regions.regions {
+        args.emit(&region.id, super::DetectionStage::Page, || {
+            let mut contour = region.contour.clone();
+            if let Some(first) = contour.first().copied() {
+                contour.push(first);
+            }
+            vec![contour]
+        });
     }
     fs::write(
         args.out.join("pages.json"),
@@ -215,7 +226,7 @@ pub(super) fn process_pages(args: &Args) -> Result<(), Box<dyn std::error::Error
         let mut profile = StepProfile::start();
         let result = (|| -> Result<ProcessSummary, Box<dyn std::error::Error>> {
             let crop_started = Instant::now();
-            let crop = smude_geometry::crop_page(&image, region)?;
+            let crop = crate::crop_page(&image, region)?;
             profile.source_crop_seconds = crop_started.elapsed().as_secs_f64();
             let write_started = Instant::now();
             crop.save(dir.join("source.png"))?;
@@ -233,7 +244,7 @@ pub(super) fn process_pages(args: &Args) -> Result<(), Box<dyn std::error::Error
                 .zip(ratio)
                 .filter(|_| !args.no_analysis_perspective)
                 .and_then(|(corners, ratio)| {
-                    smude_geometry::PageAnalysisMap::new(
+                    crate::PageAnalysisMap::new(
                         crop.width(),
                         crop.height(),
                         corners,
@@ -255,7 +266,7 @@ pub(super) fn process_pages(args: &Args) -> Result<(), Box<dyn std::error::Error
                 .transpose()?;
             let analysis_region = analysis_map.as_ref().map(|map| {
                 let [ox, oy, _, _] = region.bounds();
-                smude_geometry::PageRegion {
+                crate::PageRegion {
                     id: region.id.clone(),
                     contour: region
                         .contour
@@ -295,19 +306,41 @@ pub(super) fn process_pages(args: &Args) -> Result<(), Box<dyn std::error::Error
              -> Result<ProcessSummary, Box<dyn std::error::Error>> {
                 profile.failure_stage = Some("native_detection");
                 let detection_start = Instant::now();
+                args.emit(&region.id, super::DetectionStage::ResetMusic, Vec::new);
+                let [ox, oy, _, _] = region.bounds();
+                let to_original = |p: Point| Point {
+                    x: p.x + f64::from(ox),
+                    y: p.y + f64::from(oy),
+                };
+                let on_staves = |staves: &[crate::Staff]| {
+                    args.emit_staves(&region.id, staves, |p| {
+                        let p = if use_prepared {
+                            analysis_map.as_ref().unwrap().inverse(p).unwrap_or(Point {
+                                x: f64::NAN,
+                                y: f64::NAN,
+                            })
+                        } else {
+                            p
+                        };
+                        to_original(p)
+                    });
+                };
                 let detected = if use_prepared {
                     let prepared = prepared.as_ref().unwrap();
-                    smude_geometry::detect_with_region_mask(
+                    crate::detect::detect_masked(
                         prepared,
-                        analysis_region.as_ref().unwrap(),
                         prepared.width(),
+                        analysis_region.as_ref(),
+                        Some(&on_staves),
                     )
                     .and_then(|data| analysis_map.as_ref().unwrap().observations_to_source(&data))
                 } else {
-                    smude_geometry::detect_cropped_page(
+                    let local = crate::detect::local_region(region, ox, oy);
+                    crate::detect::detect_masked(
                         &crop,
-                        region,
                         args.analysis_width_for(&crop),
+                        Some(&local),
+                        Some(&on_staves),
                     )
                 };
                 let detection_seconds = detection_start.elapsed().as_secs_f64();
@@ -432,5 +465,25 @@ pub(super) fn process_pages(args: &Args) -> Result<(), Box<dyn std::error::Error
     if successes == 0 {
         return Err("no page produced a successful result; inspect pages_report.json".into());
     }
-    Ok(())
+    Ok(super::ProcessingResult {
+        pages: if args.detect_only || args.no_render {
+            vec![]
+        } else {
+            report
+                .pages
+                .iter()
+                .filter(|p| p.status == "success")
+                .map(|p| super::RenderedPage {
+                    id: p.id.clone(),
+                    directory: p.dir.clone(),
+                    mapping: p.measurements.as_ref().and_then(|m| m.mapping.clone()),
+                })
+                .collect()
+        },
+        warnings: report
+            .pages
+            .iter()
+            .filter_map(|p| p.error.as_ref().map(|e| format!("Page {}: {e}", p.id)))
+            .collect(),
+    })
 }

@@ -5,20 +5,22 @@ use std::{
     time::Instant,
 };
 
+use crate::{Config, Geometry, Observations, Point};
 use image::{
     ImageEncoder,
     codecs::png::{CompressionType, FilterType, PngEncoder},
 };
 use serde::Serialize;
-use smude_geometry::{Config, Geometry, Observations, Point};
 
 use super::{
-    args::{Args, CropMode},
+    options::{CropMode, Options},
     profile::StepProfile,
 };
 
 #[derive(Serialize)]
 pub(super) struct ProcessSummary {
+    #[serde(skip)]
+    pub(super) mapping: Option<std::sync::Arc<super::PreviewMap>>,
     pub(super) staves: usize,
     pub(super) barlines: usize,
     pub(super) staff_edges: usize,
@@ -31,7 +33,7 @@ pub(super) struct ProcessSummary {
 #[derive(Clone, Copy)]
 pub(super) struct PageOutput<'a> {
     pub(super) ratio: Option<f64>,
-    pub(super) region: &'a smude_geometry::PageRegion,
+    pub(super) region: &'a crate::PageRegion,
     pub(super) corners: Option<[Point; 4]>,
     pub(super) analysis_dimensions: Option<[u32; 2]>,
     pub(super) camera_center: Point,
@@ -87,7 +89,7 @@ fn music_regions(data: &Observations, geometry: &Geometry, padding: [f64; 2]) ->
 }
 
 pub(super) fn process(
-    args: &Args,
+    args: &Options,
     out: &Path,
     data: &Observations,
     source: Option<image::RgbImage>,
@@ -95,6 +97,28 @@ pub(super) fn process(
     page_output: Option<PageOutput<'_>>,
     profile: &mut StepProfile,
 ) -> Result<ProcessSummary, Box<dyn std::error::Error>> {
+    let page_id = page_output.map_or("1", |p| p.region.id.as_str());
+    let to_original = |p: Point| {
+        let [x, y, _, _] = page_output.map_or([0; 4], |p| p.region.bounds());
+        Point {
+            x: p.x + f64::from(x),
+            y: p.y + f64::from(y),
+        }
+    };
+    if args.geometry.is_some() {
+        args.emit_staves(page_id, &data.staves, to_original);
+    }
+    args.emit(page_id, super::DetectionStage::Barlines, || {
+        data.barlines
+            .iter()
+            .map(|b| {
+                b.x.iter()
+                    .zip(&b.y)
+                    .map(|(x, y)| to_original(Point { x: *x, y: *y }))
+                    .collect()
+            })
+            .collect()
+    });
     let height_width_ratio = page_output.and_then(|p| p.ratio).or(args.page_aspect);
     let oracle_corners: Option<[Point; 4]> = args
         .geometry_corners
@@ -158,7 +182,7 @@ pub(super) fn process(
             }
             region
         });
-        smude_geometry::detect_staff_edges_with_region_mask(
+        crate::detect_staff_edges_with_region_mask(
             image,
             data,
             args.analysis_width_for(image),
@@ -168,6 +192,12 @@ pub(super) fn process(
         vec![]
     };
     profile.staff_edge_detection_seconds += started.elapsed().as_secs_f64();
+    args.emit(page_id, super::DetectionStage::StaffEdges, || {
+        staff_edges
+            .iter()
+            .map(|e| e.points.iter().copied().map(to_original).collect())
+            .collect()
+    });
     let started = Instant::now();
     fs::write(
         out.join("staff-edges.json"),
@@ -183,6 +213,7 @@ pub(super) fn process(
             data.barlines.len()
         );
         return Ok(ProcessSummary {
+            mapping: None,
             staves: data.staves.len(),
             barlines: data.barlines.len(),
             staff_edges: staff_edges.len(),
@@ -272,7 +303,7 @@ pub(super) fn process(
     #[derive(Serialize)]
     struct MappedEdge {
         staff: usize,
-        side: smude_geometry::StaffEdgeSide,
+        side: crate::StaffEdgeSide,
         points: Vec<Point>,
         line_indices: Vec<usize>,
         confidence: f64,
@@ -355,7 +386,7 @@ pub(super) fn process(
             (f64::from(raster_height) * scale).round().max(2.) as u32,
         );
         let analysis = geometry.render_at_dimensions(source, aw, ah)?;
-        let analysis = smude_geometry::normalize_paper(&image::imageops::grayscale(&analysis));
+        let analysis = crate::normalize_paper(&image::imageops::grayscale(&analysis));
         profile.text_analysis_render_seconds = started.elapsed().as_secs_f64();
         let to_analysis = |p: Point| Point {
             x: (p.x - x0) * f64::from(aw - 1) / (x1 - x0),
@@ -374,7 +405,7 @@ pub(super) fn process(
             })
             .collect();
         let started = Instant::now();
-        text_lines = smude_geometry::detect_text_lines(&analysis, &guards);
+        text_lines = crate::detect_text_lines(&analysis, &guards);
         profile.text_detection_seconds = started.elapsed().as_secs_f64();
         for line in &mut text_lines {
             line.points.iter_mut().for_each(|p| *p = from_analysis(*p));
@@ -395,6 +426,12 @@ pub(super) fn process(
                     .collect::<Vec<_>>(),
             );
         }
+        args.emit(page_id, super::DetectionStage::Text, || {
+            text_sources
+                .iter()
+                .map(|line| line.iter().copied().map(to_original).collect())
+                .collect()
+        });
         let started = Instant::now();
         // Keep the 51px tone window and optical-AA neighbourhood unchanged too.
         let px = 31. * (x1 - x0) / f64::from(raster_width - 1);
@@ -530,12 +567,12 @@ pub(super) fn process(
         profile.grayscale_seconds = gray_start.elapsed().as_secs_f64();
         profile.failure_stage = Some("binarization");
         let binary_start = Instant::now();
-        let mut binary = smude_geometry::binarize_sauvola(&gray);
+        let mut binary = crate::binarize_sauvola(&gray);
         let raw_binary = binary.clone();
         profile.binarization_seconds = binary_start.elapsed().as_secs_f64();
         profile.failure_stage = Some("print_normalization");
         let print_start = Instant::now();
-        let mut clean = smude_geometry::normalize_paper(&gray);
+        let mut clean = crate::normalize_paper(&gray);
         let normalized_before_cleanup = clean.clone();
         profile.print_normalization_seconds = print_start.elapsed().as_secs_f64();
         let mut border_removed_pixels = 0;
@@ -550,16 +587,11 @@ pub(super) fn process(
                 .round()
                 .max(1.) as u32;
             border_removed_pixels =
-                smude_geometry::whiten_page_border(&mut binary, contour, border_margin_pixels);
+                crate::whiten_page_border(&mut binary, contour, border_margin_pixels);
             profile.binary_border_seconds = border_started.elapsed().as_secs_f64();
             let print_border_start = Instant::now();
-            smude_geometry::apply_binary_cleanup_with_contour(
-                &mut clean,
-                &raw_binary,
-                &binary,
-                contour,
-            );
-            smude_geometry::whiten_gray_border(
+            crate::apply_binary_cleanup_with_contour(&mut clean, &raw_binary, &binary, contour);
+            crate::whiten_gray_border(
                 &mut clean,
                 contour,
                 border_margin_pixels,
@@ -581,7 +613,7 @@ pub(super) fn process(
         }
         profile.failure_stage = Some("print_antialias");
         let antialias_start = Instant::now();
-        clean = smude_geometry::antialias_print(&clean);
+        clean = crate::antialias_print(&clean);
         profile.print_antialias_seconds = antialias_start.elapsed().as_secs_f64();
         profile.failure_stage = Some("final_crop");
         let crop_started = Instant::now();
@@ -589,8 +621,8 @@ pub(super) fn process(
             let padding =
                 (f64::from(binary.width().min(binary.height())) * args.crop_padding).round() as u32;
             final_crop = match args.crop_mode {
-                CropMode::Content => smude_geometry::content_crop(&binary, padding),
-                CropMode::Page => smude_geometry::page_crop(
+                CropMode::Content => crate::content_crop(&binary, padding),
+                CropMode::Page => crate::page_crop(
                     mapped_page_contour.as_deref().unwrap_or(&[]),
                     raster_width,
                     raster_height,
@@ -693,7 +725,7 @@ pub(super) fn process(
     profile.geometry_export_seconds += export_started.elapsed().as_secs_f64();
     #[derive(Serialize)]
     struct Run<'a> {
-        geometry: &'a smude_geometry::Report,
+        geometry: &'a crate::Report,
         output_height_width_ratio: Option<f64>,
         render_canvas_height_width_ratio: Option<f64>,
         output_size: [u32; 2],
@@ -737,7 +769,22 @@ pub(super) fn process(
         "fit {fit_seconds:0.3}s; render {render_seconds:?}s; {}",
         out.display()
     );
+    let [ox, oy, _, _] = page_output.map_or([0; 4], |p| p.region.bounds());
+    let mapping = render_seconds.map(|_| {
+        std::sync::Arc::new(super::PreviewMap::new(
+            geometry,
+            Point {
+                x: f64::from(ox),
+                y: f64::from(oy),
+            },
+            [data.width, data.height],
+            page_output.map(|p| p.region.clone()),
+            [raster_width, raster_height],
+            final_crop,
+        ))
+    });
     Ok(ProcessSummary {
+        mapping,
         staves: data.staves.len(),
         barlines: data.barlines.len(),
         staff_edges: staff_edges.len(),

@@ -9,6 +9,39 @@ Development continues on branch `v2`. This is an alpha: the independent geometry
 suite passes, but arbitrary paper deformation and page detection are not solved
 universally. The recognition and OMR projects remain separate.
 
+## Desktop app
+
+```sh
+cargo run -p smude-gui
+# Optimized desktop executable:
+cargo build --release -p smude-gui
+# Optional macOS .app bundle (requires cargo-packager):
+(cd gui && cargo packager --release --formats app)
+```
+
+The separate `gui/` crate uses egui/eframe and the same in-process processing
+engine as the CLI. Add JPEG/PNG files or recursively import folders using the
+native picker or drag and drop. Processing is automatic, including page detection;
+the preview and PNG export always use the paper-white grayscale result. The file
+queue can be paused after the current image. Compare original and result, zoom,
+pan, and choose the output page for double-page photos. Export one page or every
+completed page; existing files are preserved with numbered filenames.
+The original preview receives live page, staff, barline, system-edge and text
+overlays as their detector stages finish. A scan sweep and progressive line
+reveal visualize this progress without delaying processing. The Erkennungen
+button hides or shows overlays; exported images remain clean.
+Zooming and panning follow corresponding music positions in both previews,
+using the actual forward/inverse geometry including the final crop. Local
+geometric scale is accounted for instead of equating source and output pixels.
+
+The models and ONNX Runtime are embedded, so no CLI sidecar, runtime installation
+or external model files are needed by the GUI. The CLI remains independently
+buildable with its full processing and output options.
+
+The desktop UI ports Wing Companion's typography, icon set, widgets, palette,
+card gradients and background effects. Font and icon licences are included in
+`gui/assets/fonts/` and available in the app's Info dialog.
+
 ## Run
 
 ```sh
@@ -87,9 +120,9 @@ ossia with regular-sized staves merely because it is nearby.
 
 ```sh
 cargo fmt --check
-cargo test --all-targets
+cargo test --workspace --all-targets
 cargo test --no-default-features
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The development batch produced outputs for 146 of 154 photos; the eight known
@@ -104,6 +137,7 @@ claims. Model weights, datasets and generated images are not committed.
 | `Cargo.toml`, `Cargo.lock` | Rust crate and locked dependencies |
 | `src/` | Native geometry, detection, rendering and CLI |
 | `tests/` | Rust regressions and required fixture |
+| `gui/` | egui/eframe desktop app, preview and export |
 
 Git ignores local assets, build products and generated results. Historical
 Python code, research prototypes, synthetic generation and old development

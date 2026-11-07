@@ -1,0 +1,35 @@
+[package]
+name = "smude-gui"
+version = "2.0.0-alpha.1"
+edition = "2024"
+publish = false
+license = "LicenseRef-Commons-Clause-AGPL-3.0"
+description = "Desktop app for sheet music rectification"
+
+[dependencies]
+smude-geometry = { path = "..", default-features = false, features = ["application", "onnx-pages"] }
+eframe = { version = "0.36.2", default-features = false, features = ["x11", "wayland", "default_fonts", "persistence", "accesskit"] }
+epaint_default_fonts = "0.36.2"
+rfd = "0.17"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+walkdir = "2"
+rayon = "1"
+open = "5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu_no_default_features"] }
+wgpu = { version = "30", default-features = false, features = ["std", "metal", "wgsl"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["glow"] }
+
+[package.metadata.packager]
+product-name = "Smude"
+identifier = "com.gridnote-labs.smude"
+formats = ["app"]
+icons = ["assets/icon.icns", "assets/icon.png"]
+
+[package.metadata.packager.macos]
+minimum-system-version = "13.0"

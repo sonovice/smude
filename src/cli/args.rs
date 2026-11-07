@@ -127,39 +127,67 @@ pub(super) struct Args {
     pub(super) probe_points: Option<PathBuf>,
 }
 
-impl Args {
-    pub(super) fn uses_page_mode(&self) -> bool {
-        self.page_regions.is_some()
-            || self.pages
-            || (cfg!(feature = "onnx-pages") && !self.no_pages && self.geometry.is_none())
-    }
-
-    pub(super) fn analysis_width_for(&self, image: &image::RgbImage) -> u32 {
-        self.analysis_width.unwrap_or_else(|| {
-            if self.analysis_long_edge.is_none() {
-                return 1800;
-            }
-            let longest = image.width().max(image.height());
-            (u64::from(image.width())
-                * u64::from(
-                    self.analysis_long_edge
-                        .map(|limit| limit.min(longest))
-                        .unwrap_or(longest),
-                )
-                / u64::from(longest)) as u32
-        })
+impl From<Args> for smude_geometry::application::Options {
+    fn from(args: Args) -> Self {
+        use smude_geometry::application as engine;
+        Self {
+            progress: None,
+            geometry: args.geometry,
+            geometry_corners: args.geometry_corners,
+            geometry_contour: args.geometry_contour,
+            page_aspect: args.page_aspect,
+            pages: args.pages,
+            no_pages: args.no_pages,
+            page_layout: match args.page_layout {
+                PageLayout::Auto => engine::PageLayout::Auto,
+                PageLayout::Single => engine::PageLayout::Single,
+                PageLayout::Double => engine::PageLayout::Double,
+            },
+            spread_layout: match args.spread_layout {
+                SpreadLayout::SideBySide => engine::SpreadLayout::SideBySide,
+                SpreadLayout::Stacked => engine::SpreadLayout::Stacked,
+            },
+            page_models: args.page_models,
+            page_regions: args.page_regions,
+            image: args.image,
+            out: args.out,
+            perspective: args.perspective,
+            no_perspective: args.no_perspective,
+            no_gcs: args.no_gcs,
+            no_vertical_correction: args.no_vertical_correction,
+            page_perspective: args.page_perspective,
+            no_page_perspective: args.no_page_perspective,
+            no_analysis_perspective: args.no_analysis_perspective,
+            no_text_dewarp: args.no_text_dewarp,
+            no_staff_edges: args.no_staff_edges,
+            system_shear: args.system_shear,
+            same_size: args.same_size,
+            size_prior: args.size_prior,
+            no_render: args.no_render,
+            detect_only: args.detect_only,
+            analysis_long_edge: args.analysis_long_edge,
+            analysis_width: args.analysis_width,
+            binary_page_margin: args.binary_page_margin,
+            no_final_crop: args.no_final_crop,
+            crop_mode: match args.crop_mode {
+                CropMode::Page => engine::CropMode::Page,
+                CropMode::Content => engine::CropMode::Content,
+            },
+            crop_padding: args.crop_padding,
+            probe_points: args.probe_points,
+        }
     }
 }
 
 #[cfg(test)]
 mod output_defaults_tests {
     use super::*;
-    use smude_geometry::Config;
+    use smude_geometry::{Config, application::Options};
 
     #[test]
     fn analysis_limit_uses_long_edge_without_upscaling_and_keeps_legacy_override() {
         use clap::Parser;
-        let args = super::Args::parse_from([
+        let args: Options = super::Args::parse_from([
             "smude-v2",
             "--image",
             "unused",
@@ -167,7 +195,8 @@ mod output_defaults_tests {
             "unused",
             "--analysis-long-edge",
             "1800",
-        ]);
+        ])
+        .into();
         assert_eq!(
             args.analysis_width_for(&image::RgbImage::new(3000, 4000)),
             1350
@@ -180,7 +209,7 @@ mod output_defaults_tests {
             args.analysis_width_for(&image::RgbImage::new(600, 800)),
             600
         );
-        let old = super::Args::parse_from([
+        let old: Options = super::Args::parse_from([
             "smude-v2",
             "--image",
             "unused",
@@ -188,7 +217,8 @@ mod output_defaults_tests {
             "unused",
             "--analysis-width",
             "1800",
-        ]);
+        ])
+        .into();
         assert_eq!(
             old.analysis_width_for(&image::RgbImage::new(3000, 4000)),
             1800
@@ -200,7 +230,7 @@ mod output_defaults_tests {
         let parse = |flags: &[&str]| {
             let mut command = vec!["smude-v2", "--image", "source.png", "--out", "result"];
             command.extend_from_slice(flags);
-            Args::try_parse_from(command)
+            Args::try_parse_from(command).map(Options::from)
         };
         assert_eq!(
             parse(&[]).unwrap().uses_page_mode(),
@@ -227,7 +257,7 @@ mod output_defaults_tests {
         let parse = |flags: &[&str]| {
             let mut command = vec!["smude-v2", "--image", "source.png", "--out", "result"];
             command.extend_from_slice(flags);
-            Args::try_parse_from(command).unwrap()
+            Options::from(Args::try_parse_from(command).unwrap())
         };
         for flags in [
             vec![],

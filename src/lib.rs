@@ -2,6 +2,9 @@
 //! Core fitting uses observations; optional ONNX inference supplies page contours.
 //! Fit once, transform observations, sample the original image once.
 
+#[cfg(feature = "application")]
+pub mod application;
+
 use serde::{Deserialize, Serialize};
 
 mod gcs;
