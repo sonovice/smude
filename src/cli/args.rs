@@ -53,9 +53,9 @@ pub(super) struct Args {
     /// Arrangement of a double-page capture; independent of image aspect ratio.
     #[arg(long, value_enum, default_value = "side-by-side")]
     pub(super) spread_layout: SpreadLayout,
-    /// Prepared ONNX weights: page layout and contour/aspect head.
-    #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/models/page-boundary"))]
-    pub(super) page_models: PathBuf,
+    /// Override the bundled page-layout and contour/aspect ONNX weights.
+    #[arg(long)]
+    pub(super) page_models: Option<PathBuf>,
     /// Explicit PageRegions JSON in original-image pixel coordinates.
     #[arg(long, conflicts_with_all = ["geometry", "same_size", "probe_points"])]
     pub(super) page_regions: Option<PathBuf>,

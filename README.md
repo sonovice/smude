@@ -22,19 +22,24 @@ Page detection runs by default and creates separate outputs for a book spread:
 target/release/smude-v2 --image spread.jpg --out outputs/spread
 ```
 
-Default page detection needs locally prepared model weights. Cargo supplies and statically
-links ONNX Runtime automatically; the first build needs network access.
+The release executable includes both page-detection models and statically linked
+ONNX Runtime. It needs no companion model files or ONNX Runtime installation.
+Normal operating-system libraries remain required.
 Left/right is the default spread
 layout, independent of image shape. Use `--spread-layout stacked` for pages above
 one another. Failed or cropped neighbouring pages are reported separately.
 
 ## Page model assets
 
-Page detection requires `page-boundary.onnx` and `page-layout.onnx` under
-`models/page-boundary/`, or a directory supplied with `--page-models DIRECTORY`.
-The contour head must return 96 ordered x/y perimeter points followed by the
-height/width ratio (193 values). Model weights are supplied separately. A native
-ONNX Runtime library does not belong in the model directory.
+The default models are embedded in the executable and loaded directly from memory.
+`--page-models DIRECTORY` explicitly overrides them with external
+`page-boundary.onnx` and `page-layout.onnx` files.
+
+For a source build with `onnx-pages`, the two model files must be available under
+`models/page-boundary/` at compile time. They are supplied separately and remain
+Git-ignored. Cargo downloads the matching ONNX Runtime archive on the first
+build and links it statically. Neither the source model directory nor network
+access is needed when running the completed executable.
 
 `--no-pages` skips page detection for an already cropped image. Supplying
 `--geometry` also skips detection and reuses the supplied measurements. Builds

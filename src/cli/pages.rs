@@ -49,7 +49,11 @@ fn automatic_regions(
     #[cfg(feature = "onnx-pages")]
     {
         let started = Instant::now();
-        let detector = smude_geometry::PageDetector::load(&args.page_models)?;
+        let detector = if let Some(directory) = &args.page_models {
+            smude_geometry::PageDetector::load(directory)?
+        } else {
+            smude_geometry::PageDetector::embedded()?
+        };
         let model_load_seconds = started.elapsed().as_secs_f64();
         let layout = match args.page_layout {
             PageLayout::Auto => smude_geometry::PageLayoutMode::Auto,
@@ -66,6 +70,7 @@ fn automatic_regions(
             args.out.join("page_detection.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
                 "backend":"onnxruntime", "model_directory":args.page_models,
+                "model_source": if args.page_models.is_some() { "directory" } else { "embedded" },
                 "model_load_seconds":model_load_seconds, "detection":detection,
                 "neural_mesh_warp_applied":false
             }))?,

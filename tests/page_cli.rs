@@ -193,3 +193,34 @@ fn default_uses_page_detection_and_no_pages_bypasses_models() {
     assert_eq!(report["profile"]["failure_stage"], "native_detection");
     assert!(!bypass.join("pages_report.json").exists());
 }
+
+#[cfg(feature = "onnx-pages")]
+#[test]
+fn bundled_models_load_from_an_unrelated_working_directory() {
+    let fixture = Fixture::new();
+    let input = fixture.0.join("blank.png");
+    RgbImage::from_pixel(600, 800, Rgb([255; 3]))
+        .save(&input)
+        .unwrap();
+    let out = fixture.0.join("bundled");
+    let output = Command::new(env!("CARGO_BIN_EXE_smude-v2"))
+        .current_dir(&fixture.0)
+        .arg("--image")
+        .arg(&input)
+        .arg("--out")
+        .arg(&out)
+        .arg("--detect-only")
+        .output()
+        .unwrap();
+    // A blank page may abstain; loading/inference must still have succeeded.
+    let diagnostic = fs::read(out.join("page_detection.json")).unwrap_or_else(|e| {
+        panic!(
+            "embedded inference failed: {e}; {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    let report: Value = serde_json::from_slice(&diagnostic).unwrap();
+    assert_eq!(report["model_source"], "embedded");
+    assert!(report["model_directory"].is_null());
+    assert!(!fixture.0.join("models").exists());
+}

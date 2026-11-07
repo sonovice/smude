@@ -6,7 +6,10 @@ use crate::{Error, PageRegion, PageRegions, Point, Result};
 use image::{RgbImage, imageops};
 use onnx_runtime::{
     environment::Environment,
-    session::{Session, builder::AutoDevicePolicy},
+    session::{
+        Session,
+        builder::{AutoDevicePolicy, SessionBuilder},
+    },
     value::TensorRef,
 };
 use serde::{Deserialize, Serialize};
@@ -72,7 +75,7 @@ fn model_error(error: impl std::fmt::Display) -> Error {
     Error::PageModel(error.to_string())
 }
 
-fn onnx_session(path: &Path) -> Result<Session> {
+fn onnx_session_builder() -> Result<SessionBuilder> {
     static ENVIRONMENT: OnceLock<std::result::Result<Environment, String>> = OnceLock::new();
     let environment = ENVIRONMENT
         .get_or_init(|| {
@@ -90,8 +93,6 @@ fn onnx_session(path: &Path) -> Result<Session> {
         .with_intra_threads(4)
         .map_err(model_error)?
         .with_inter_threads(1)
-        .map_err(model_error)?
-        .commit_from_file(path)
         .map_err(model_error)
 }
 
@@ -102,8 +103,18 @@ struct ImageModel {
 impl ImageModel {
     fn load(directory: &Path, name: &str, output_len: usize) -> Result<Self> {
         let path = directory.join(format!("{name}.onnx"));
-        let session = onnx_session(&path)
+        let session = onnx_session_builder()?
+            .commit_from_file(&path)
             .map_err(|e| model_error(format!("loading {}: {e}", path.display())))?;
+        Ok(Self {
+            session: Mutex::new(session),
+            output_len,
+        })
+    }
+    fn embedded(name: &str, bytes: &[u8], output_len: usize) -> Result<Self> {
+        let session = onnx_session_builder()?
+            .commit_from_memory(bytes)
+            .map_err(|e| model_error(format!("loading embedded {name}: {e}")))?;
         Ok(Self {
             session: Mutex::new(session),
             output_len,
@@ -143,6 +154,23 @@ pub struct PageDetector {
     boundary: ImageModel,
 }
 impl PageDetector {
+    /// Load the bundled weights directly from executable memory, without files.
+    pub fn embedded() -> Result<Self> {
+        const LAYOUT: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/models/page-boundary/page-layout.onnx"
+        ));
+        const BOUNDARY: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/models/page-boundary/page-boundary.onnx"
+        ));
+        Ok(Self {
+            classifier: ImageModel::embedded("page-layout", LAYOUT, 5)?,
+            boundary: ImageModel::embedded("page-boundary", BOUNDARY, 193)?,
+        })
+    }
+
+    /// Explicitly override bundled weights with externally supplied models.
     pub fn load(model_dir: &Path) -> Result<Self> {
         Ok(Self {
             classifier: ImageModel::load(model_dir, "page-layout", 5)?,
