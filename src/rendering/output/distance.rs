@@ -1,140 +1,201 @@
-//! Exact capped distance fields, with optional GPU acceleration.
-use super::PageBorder;
+//! Exact capped Chebyshev distance fields.
 use rayon::prelude::*;
+use std::ops::Range;
 
-pub(super) fn gpu_pair_distance(
-    prepared: Option<&PageBorder<'_>>,
-    a: &[u8],
-    b: &[u8],
-    w: usize,
-    h: usize,
-    cap: u8,
-) -> Option<(Vec<u8>, Vec<u8>)> {
-    let prepared = prepared.filter(|p| p.use_gpu && p.gpu_error.get().is_none())?;
-    #[cfg(feature = "gpu-render")]
-    {
-        let start = std::time::Instant::now();
-        let result = match crate::rendering::gpu::distance_pair(a, b, w, h, cap) {
-            Ok(result) => result,
-            Err(error) => {
-                let _ = prepared.gpu_error.set(error);
-                return None;
-            }
-        };
-        prepared.record_gpu(start);
-        Some(result)
-    }
-    #[cfg(not(feature = "gpu-render"))]
-    {
-        let _ = (prepared, a, b, w, h, cap);
-        None
-    }
-}
+/// Side of the square blocks in which a field is classified as worth sweeping.
+const TILE: usize = 64;
 
-pub(super) fn gpu_single_distance(
-    prepared: Option<&PageBorder<'_>>,
-    seeds: &[u16],
-    w: usize,
-    h: usize,
-    cap: u16,
-) -> Option<Vec<u16>> {
-    let prepared = prepared.filter(|p| p.use_gpu && p.gpu_error.get().is_none())?;
-    #[cfg(feature = "gpu-render")]
-    {
-        let start = std::time::Instant::now();
-        let result = match crate::rendering::gpu::distance_single(seeds, w, h, cap) {
-            Ok(result) => result,
-            Err(error) => {
-                let _ = prepared.gpu_error.set(error);
-                return None;
-            }
-        };
-        prepared.record_gpu(start);
-        Some(result)
-    }
-    #[cfg(not(feature = "gpu-render"))]
-    {
-        let _ = (prepared, seeds, w, h, cap);
-        None
-    }
-}
-
-/// Exact capped distance transform in independent row strips. A halo at least
-/// the distance cap excludes any influence from seeds beyond a strip, while
-/// allowing the serial recurrences to run in parallel without approximations.
-pub(super) fn capped_distance<T>(seeds: &[T], w: usize, h: usize, cap: T, halo: usize) -> Vec<T>
+/// Exact capped distance transform, in place. `field` holds 0 at seeds and
+/// `cap` elsewhere; no value may exceed `cap`.
+pub(super) fn capped_distance<T>(field: &mut [T], w: usize, h: usize, cap: T)
 where
-    T: Copy + Ord + From<u8> + std::ops::Add<Output = T> + Send + Sync,
+    T: Copy + Ord + From<u8> + Into<usize> + std::ops::Add<Output = T> + Send + Sync,
+{
+    capped_distance_in_bands(field, w, h, cap, rayon::current_num_threads());
+}
+
+/// [`capped_distance`] with the rows split into at most `bands` bands that are
+/// swept side by side. A value depends only on the field within `cap` rows of
+/// it, so a band swept together with that many rows around it is exact.
+pub(super) fn capped_distance_in_bands<T>(field: &mut [T], w: usize, h: usize, cap: T, bands: usize)
+where
+    T: Copy + Ord + From<u8> + Into<usize> + std::ops::Add<Output = T> + Send + Sync,
 {
     if w == 0 || h == 0 {
-        return seeds.to_vec();
+        return;
     }
-    const ROWS: usize = 256;
-    let one = T::from(1);
-    let mut output = vec![cap; seeds.len()];
-    output
-        .par_chunks_mut(w * ROWS)
-        .enumerate()
-        .for_each(|(strip, out)| {
-            let y0 = strip * ROWS;
-            let y1 = (y0 + ROWS).min(h);
-            let start = y0.saturating_sub(halo);
-            let end = (y1 + halo).min(h);
-            let height = end - start;
-            let mut d = seeds[start * w..end * w].to_vec();
-            for y in 0..height {
-                for x in 0..w {
-                    let i = y * w + x;
-                    let mut v = d[i];
-                    if x > 0 {
-                        v = v.min(d[i - 1] + one);
-                    }
-                    if y > 0 {
-                        v = v.min(d[i - w] + one);
-                        if x > 0 {
-                            v = v.min(d[i - w - 1] + one);
-                        }
-                        if x + 1 < w {
-                            v = v.min(d[i - w + 1] + one);
-                        }
-                    }
-                    d[i] = v.min(cap);
-                }
-            }
-            for y in (0..height).rev() {
-                for x in (0..w).rev() {
-                    let i = y * w + x;
-                    let mut v = d[i];
-                    if x + 1 < w {
-                        v = v.min(d[i + 1] + one);
-                    }
-                    if y + 1 < height {
-                        v = v.min(d[i + w] + one);
-                        if x > 0 {
-                            v = v.min(d[i + w - 1] + one);
-                        }
-                        if x + 1 < w {
-                            v = v.min(d[i + w + 1] + one);
-                        }
-                    }
-                    d[i] = v.min(cap);
-                }
-            }
-            out.copy_from_slice(&d[(y0 - start) * w..(y1 - start) * w]);
+    let halo: usize = cap.into();
+    // The rows around a band are swept with both neighbours as well; bands
+    // several times taller keep that a small share of the work.
+    let bands = bands.min(h / (4 * halo.max(1))).max(1);
+    if bands == 1 {
+        return sweep(field, w, h, cap);
+    }
+    let rows = h.div_ceil(bands);
+    let source = &*field;
+    let swept: Vec<_> = (0..h.div_ceil(rows))
+        .into_par_iter()
+        .map(|band| {
+            let first = (band * rows).saturating_sub(halo);
+            let last = ((band + 1) * rows + halo).min(h);
+            let mut local = source[first * w..last * w].to_vec();
+            sweep(&mut local, w, last - first, cap);
+            (band * rows - first, local)
+        })
+        .collect();
+    field
+        .par_chunks_mut(rows * w)
+        .zip(swept)
+        .for_each(|(band, (skipped, local))| {
+            band.copy_from_slice(&local[skipped * w..][..band.len()]);
         });
-    output
 }
 
-/// Capped Chebyshev distance seeded from the actual mapped perimeter. The
-/// image canvas is deliberately not treated as a physical page boundary.
-pub(super) fn distance_to_contour(
-    contour: &[crate::geometry::Point],
-    w: usize,
-    h: usize,
-    cap: u16,
-    prepared: Option<&PageBorder<'_>>,
-) -> Vec<u16> {
-    let mut d = vec![cap; w * h];
+/// Two chamfer sweeps with unit weights, which are exact for the Chebyshev
+/// metric. They visit only tiles a seed can reach: every other pixel already
+/// holds its final value, which keeps the restricted sweeps exact.
+fn sweep<T>(field: &mut [T], w: usize, h: usize, cap: T)
+where
+    T: Copy + Ord + From<u8> + Into<usize> + std::ops::Add<Output = T> + Send + Sync,
+{
+    let spans = reachable_spans(field, w, h, cap);
+    let one = T::from(1);
+    for y in 0..h {
+        let (above, below) = field.split_at_mut(y * w);
+        let row = &mut below[..w];
+        for span in &spans[y / TILE] {
+            if y > 0 {
+                relax(row, &above[(y - 1) * w..], span, one);
+            }
+            let mut reach = if span.start > 0 {
+                row[span.start - 1] + one
+            } else {
+                cap
+            };
+            for value in &mut row[span.clone()] {
+                *value = (*value).min(reach);
+                reach = *value + one;
+            }
+        }
+    }
+    for y in (0..h).rev() {
+        let (above, below) = field.split_at_mut((y + 1) * w);
+        let row = &mut above[y * w..];
+        for span in &spans[y / TILE] {
+            if y + 1 < h {
+                relax(row, &below[..w], span, one);
+            }
+            let mut reach = if span.end < w {
+                row[span.end] + one
+            } else {
+                cap
+            };
+            for value in row[span.clone()].iter_mut().rev() {
+                *value = (*value).min(reach);
+                reach = *value + one;
+            }
+        }
+    }
+}
+
+/// Lower `row[span]` to one more than the three vertical neighbours in `other`.
+fn relax<T>(row: &mut [T], other: &[T], span: &Range<usize>, one: T)
+where
+    T: Copy + Ord + std::ops::Add<Output = T>,
+{
+    let w = row.len();
+    if span.start == 0 {
+        row[0] = row[0].min(other[0].min(other[1.min(w - 1)]) + one);
+    }
+    if span.end == w && w > 1 {
+        row[w - 1] = row[w - 1].min(other[w - 2].min(other[w - 1]) + one);
+    }
+    let (start, end) = (span.start.max(1), span.end.min(w - 1));
+    if start < end {
+        let left = &other[start - 1..end - 1];
+        let right = &other[start + 1..end + 1];
+        for (((value, a), b), c) in row[start..end]
+            .iter_mut()
+            .zip(left)
+            .zip(&other[start..end])
+            .zip(right)
+        {
+            *value = (*value).min((*a).min(*b).min(*c) + one);
+        }
+    }
+}
+
+/// Pixel column ranges, per tile row, whose values a seed can still lower:
+/// tiles within `cap - 1` pixels of a tile holding a value below `cap`, except
+/// tiles which are zero throughout.
+fn reachable_spans<T>(field: &[T], w: usize, h: usize, cap: T) -> Vec<Vec<Range<usize>>>
+where
+    T: Copy + Ord + From<u8> + Into<usize> + Send + Sync,
+{
+    let (columns, rows) = (w.div_ceil(TILE), h.div_ceil(TILE));
+    let zero = T::from(0);
+    // Per tile: (holds a value below cap, holds a value above zero).
+    let mut tiles = vec![(false, false); columns * rows];
+    tiles
+        .par_chunks_mut(columns)
+        .zip(field.par_chunks(w * TILE))
+        .for_each(|(tiles, band)| {
+            for row in band.chunks(w) {
+                for (tile, values) in tiles.iter_mut().zip(row.chunks(TILE)) {
+                    tile.0 |= values.iter().copied().min().is_some_and(|v| v < cap);
+                    tile.1 |= values.iter().copied().max().is_some_and(|v| v > zero);
+                }
+            }
+        });
+    let reach = cap.into().saturating_sub(1).div_ceil(TILE);
+    // Separable dilation of the seeded tiles by `reach` tiles.
+    let mut near = vec![false; columns * rows];
+    for (near, tiles) in near.chunks_mut(columns).zip(tiles.chunks(columns)) {
+        let mut last = None;
+        for c in 0..columns {
+            last = if tiles[c].0 { Some(c) } else { last };
+            near[c] = last.is_some_and(|seeded| c - seeded <= reach);
+        }
+        let mut next = None;
+        for c in (0..columns).rev() {
+            next = if tiles[c].0 { Some(c) } else { next };
+            near[c] |= next.is_some_and(|seeded| seeded - c <= reach);
+        }
+    }
+    let mut reachable = vec![false; columns * rows];
+    for c in 0..columns {
+        let mut last = None;
+        for r in 0..rows {
+            last = if near[r * columns + c] { Some(r) } else { last };
+            reachable[r * columns + c] = last.is_some_and(|seeded| r - seeded <= reach);
+        }
+        let mut next = None;
+        for r in (0..rows).rev() {
+            next = if near[r * columns + c] { Some(r) } else { next };
+            reachable[r * columns + c] |= next.is_some_and(|seeded| seeded - r <= reach);
+        }
+    }
+    reachable
+        .chunks(columns)
+        .zip(tiles.chunks(columns))
+        .map(|(reachable, tiles)| {
+            let mut spans: Vec<Range<usize>> = vec![];
+            for c in (0..columns).filter(|c| reachable[*c] && tiles[*c].1) {
+                let (start, end) = (c * TILE, ((c + 1) * TILE).min(w));
+                match spans.last_mut() {
+                    Some(span) if span.end == start => span.end = end,
+                    _ => spans.push(start..end),
+                }
+            }
+            spans
+        })
+        .collect()
+}
+
+/// Zero the pixels of the mapped perimeter. The image canvas is deliberately
+/// not treated as a physical page boundary: a crop edge can cut through page
+/// interior.
+fn seed_contour(field: &mut [u16], contour: &[crate::geometry::Point], w: usize, h: usize) {
     for (a, b) in contour
         .iter()
         .zip(contour.iter().cycle().skip(1))
@@ -146,40 +207,39 @@ pub(super) fn distance_to_contour(
             let x = (a.x + (b.x - a.x) * t).round() as i64;
             let y = (a.y + (b.y - a.y) * t).round() as i64;
             if x >= 0 && y >= 0 && x < w as i64 && y < h as i64 {
-                d[y as usize * w + x as usize] = 0;
+                field[y as usize * w + x as usize] = 0;
             }
         }
     }
-    gpu_single_distance(prepared, &d, w, h, cap)
-        .unwrap_or_else(|| capped_distance(&d, w, h, cap, usize::from(cap)))
 }
 
+/// Capped Chebyshev distance to the mapped perimeter.
+pub(super) fn distance_to_contour(
+    contour: &[crate::geometry::Point],
+    w: usize,
+    h: usize,
+    cap: u16,
+) -> Vec<u16> {
+    let mut distance = vec![cap; w * h];
+    seed_contour(&mut distance, contour, w, h);
+    capped_distance(&mut distance, w, h, cap);
+    distance
+}
+
+/// Capped Chebyshev distance to the mapped perimeter or anything outside the
+/// page mask.
 pub(super) fn rim_distance(
     mask: &[u8],
     contour: &[crate::geometry::Point],
     w: usize,
     h: usize,
     cap: u16,
-    prepared: Option<&PageBorder<'_>>,
 ) -> Vec<u16> {
-    let mut distance: Vec<u16> = mask.iter().map(|&v| if v == 0 { 0 } else { cap }).collect();
-    // A crop edge can cut through page interior. Seed only the actual mapped
-    // perimeter (and confirmed outside mask), never arbitrary canvas edges.
-    for (a, b) in contour
-        .iter()
-        .zip(contour.iter().cycle().skip(1))
-        .take(contour.len())
-    {
-        let n = ((a.x - b.x).abs().max((a.y - b.y).abs()).ceil() as usize).max(1);
-        for j in 0..=n {
-            let t = j as f64 / n as f64;
-            let x = (a.x + (b.x - a.x) * t).round() as i64;
-            let y = (a.y + (b.y - a.y) * t).round() as i64;
-            if x >= 0 && y >= 0 && x < w as i64 && y < h as i64 {
-                distance[y as usize * w + x as usize] = 0;
-            }
-        }
-    }
-    gpu_single_distance(prepared, &distance, w, h, cap)
-        .unwrap_or_else(|| capped_distance(&distance, w, h, cap, usize::from(cap)))
+    let mut distance: Vec<u16> = mask
+        .par_iter()
+        .map(|&v| if v == 0 { 0 } else { cap })
+        .collect();
+    seed_contour(&mut distance, contour, w, h);
+    capped_distance(&mut distance, w, h, cap);
+    distance
 }

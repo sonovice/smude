@@ -163,6 +163,7 @@ impl Geometry {
 mod tests {
     use super::*;
     use crate::detection::TextLine;
+    use crate::geometry::fit::Nearby;
     use crate::geometry::{Barline, Config, Observations, Staff};
     #[test]
     fn scanline_inverse_matches_general_composition_with_text_gcs_and_x_correction() {
@@ -215,18 +216,29 @@ mod tests {
                 }],
                 &[[80., 210., 920., 610.]],
             );
+            // One state carried across every sample and row, as tiles and
+            // rendered rows do, must agree with a fresh one at each sample,
+            // and so must a row mapped as a whole.
+            let mut nearby = Nearby::default();
+            let xs: Vec<_> = (0..141).map(|i| i as f64 * 7.2 - 7.5).collect();
+            let mut row = vec![Point { x: 0., y: 0. }; xs.len()];
             for j in 0..241 {
                 let y = j as f64 * 3. - 12.5;
-                let inverse = map.inverse_scanline(y);
-                for i in 0..141 {
-                    let x = i as f64 * 7.2 - 7.5;
-                    let a = inverse(x);
+                let scanline = map.inverse_scanline(y);
+                scanline.fill(&xs, &mut row, &mut nearby);
+                for (&x, &filled) in xs.iter().zip(&row) {
                     let b = map.inverse(Point { x, y });
-                    assert!(
-                        a.x.to_bits() == b.x.to_bits() || (a.x.is_nan() && b.x.is_nan()),
-                        "gcs={gcs}, {x}, {y}: {a:?} != {b:?}"
-                    );
-                    assert!(a.y.to_bits() == b.y.to_bits() || (a.y.is_nan() && b.y.is_nan()));
+                    for a in [
+                        scanline.at(x, &mut Nearby::default()),
+                        scanline.at(x, &mut nearby),
+                        filled,
+                    ] {
+                        assert!(
+                            a.x.to_bits() == b.x.to_bits() || (a.x.is_nan() && b.x.is_nan()),
+                            "gcs={gcs}, {x}, {y}: {a:?} != {b:?}"
+                        );
+                        assert!(a.y.to_bits() == b.y.to_bits() || (a.y.is_nan() && b.y.is_nan()));
+                    }
                 }
             }
         }

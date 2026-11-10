@@ -5,11 +5,58 @@ use image::GrayImage;
 use rayon::prelude::*;
 use std::borrow::Cow;
 
+/// Whiten only confidently exterior pixels. Preserve the entire page and an
+/// outward uncertainty band, regardless of tone, ink components or music boxes.
+pub(super) fn whiten_exterior_impl(
+    gray: &mut GrayImage,
+    contour: &[crate::geometry::Point],
+    margin: u32,
+    prepared: &PageBorder<'_>,
+) {
+    let (w, h) = (gray.width() as usize, gray.height() as usize);
+    if w == 0
+        || h == 0
+        || contour.len() < 3
+        || contour.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+    {
+        return;
+    }
+    let mask = prepared.mask.get_or_init(|| page_mask(contour, w, h));
+    let margin = margin.min(u32::from(u16::MAX - 1)) as u16;
+    // The band field shared with the gray cleanup answers the same question
+    // whenever it reaches at least as far as the margin.
+    let band = rim_band(w, h);
+    let boundary = if margin <= band {
+        Cow::Borrowed(
+            prepared
+                .boundary
+                .get_or_init(|| distance_to_contour(contour, w, h, band + 1))
+                .as_slice(),
+        )
+    } else {
+        Cow::Owned(distance_to_contour(contour, w, h, margin + 1))
+    };
+    gray.as_mut()
+        .par_iter_mut()
+        .zip(mask)
+        .zip(boundary.as_ref())
+        .for_each(|((pixel, inside), distance)| {
+            if *inside == 0 && *distance > margin {
+                *pixel = 255;
+            }
+        });
+}
+
+/// Width of the strip along the page perimeter in which rims are sought.
+fn rim_band(w: usize, h: usize) -> u16 {
+    ((w.min(h) as f64 * 0.04).ceil() as u16).max(2)
+}
+
 /// Transfer confirmed removed ink to gray output without thresholding valid
 /// antialiased glyph edges. Halo pixels are removed only when closer to a
 /// removed core than to retained ink; ties protect the retained foreground.
 pub fn apply_binary_cleanup(gray: &mut GrayImage, raw: &GrayImage, cleaned: &GrayImage) -> usize {
-    apply_binary_cleanup_impl(gray, raw, cleaned, None, None)
+    apply_binary_cleanup_impl(gray, raw, cleaned, None, None, None)
 }
 
 /// Reconstruct complete soft-gray rim halos from confirmed removed cores.
@@ -21,7 +68,7 @@ pub fn apply_binary_cleanup_with_contour(
     cleaned: &GrayImage,
     contour: &[crate::geometry::Point],
 ) -> usize {
-    apply_binary_cleanup_impl(gray, raw, cleaned, Some(contour), None)
+    apply_binary_cleanup_impl(gray, raw, cleaned, Some(contour), None, None)
 }
 
 pub(super) fn apply_binary_cleanup_impl(
@@ -29,6 +76,7 @@ pub(super) fn apply_binary_cleanup_impl(
     raw: &GrayImage,
     cleaned: &GrayImage,
     contour: Option<&[crate::geometry::Point]>,
+    protected: Option<&[u8]>,
     prepared: Option<&PageBorder<'_>>,
 ) -> usize {
     assert_eq!(gray.dimensions(), raw.dimensions());
@@ -38,50 +86,52 @@ pub(super) fn apply_binary_cleanup_impl(
     // binary core. Extend only from confirmed removed ink; retained foreground
     // wins the distance competition, including its antialiased fringe.
     let cap: u8 = ((w.min(h) / 80).clamp(4, 64) + 1) as u8;
-    let mut removed = vec![cap; w * h];
-    let mut kept = vec![cap; w * h];
-    let mut any = false;
-    for i in 0..w * h {
-        if raw.as_raw()[i] == 0 {
-            if cleaned.as_raw()[i] == 255 {
-                removed[i] = 0;
-                any = true;
-            } else {
-                kept[i] = 0;
-            }
-        }
-    }
-    if !any || w == 0 || h == 0 {
+    let seeds = |removed: bool| -> Vec<u8> {
+        (raw.as_raw().par_iter())
+            .zip(cleaned.as_raw().par_iter())
+            .map(|(raw, cleaned)| {
+                if *raw == 0 && (*cleaned == 255) == removed {
+                    0
+                } else {
+                    cap
+                }
+            })
+            .collect()
+    };
+    let mut removed = seeds(true);
+    if !removed.contains(&0) {
         return 0;
     }
-    let (removed, kept) =
-        gpu_pair_distance(prepared, &removed, &kept, w, h, cap).unwrap_or_else(|| {
-            rayon::join(
-                || capped_distance(&removed, w, h, cap, usize::from(cap)),
-                || capped_distance(&kept, w, h, cap, usize::from(cap)),
-            )
-        });
+    let mut kept = seeds(false);
+    // Protected pixels take part in every decision but keep their tone.
+    let frozen = |i: usize| protected.is_some_and(|mask| mask[i] != 0);
+    rayon::join(
+        || capped_distance(&mut removed, w, h, cap),
+        || capped_distance(&mut kept, w, h, cap),
+    );
     let mut count = 0;
     if let Some(contour) =
         contour.filter(|p| p.len() >= 3 && p.iter().all(|p| p.x.is_finite() && p.y.is_finite()))
     {
-        let band = ((w.min(h) as f64 * 0.04).ceil() as u16).max(2);
+        let band = rim_band(w, h);
         let boundary = if let Some(prepared) = prepared {
             Cow::Borrowed(
                 prepared
                     .boundary
-                    .get_or_init(|| distance_to_contour(contour, w, h, band + 1, Some(prepared)))
+                    .get_or_init(|| distance_to_contour(contour, w, h, band + 1))
                     .as_slice(),
             )
         } else {
-            Cow::Owned(distance_to_contour(contour, w, h, band + 1, prepared))
+            Cow::Owned(distance_to_contour(contour, w, h, band + 1))
         };
         let mut seen = vec![false; w * h];
         let mut queue = vec![];
         // This is seeded reconstruction, not a wider global eroded mask. A
         // distant gray halo is removed only if connected to a proved rim core.
-        for i in 0..w * h {
-            if removed[i] == 0 && gray.as_raw()[i] < 250 && boundary[i] <= band && kept[i] > 3 {
+        let mut next = 0;
+        while let Some(i) = find_from(&removed, 0, next) {
+            next = i + 1;
+            if gray.as_raw()[i] < 250 && boundary[i] <= band && kept[i] > 3 {
                 seen[i] = true;
                 queue.push(i);
             }
@@ -90,7 +140,7 @@ pub(super) fn apply_binary_cleanup_impl(
         while cursor < queue.len() {
             let i = queue[cursor];
             cursor += 1;
-            if gray.as_raw()[i] != 255 {
+            if gray.as_raw()[i] != 255 && !frozen(i) {
                 count += 1;
                 gray.as_mut()[i] = 255;
             }
@@ -106,20 +156,25 @@ pub(super) fn apply_binary_cleanup_impl(
             }
         }
     }
-    for i in 0..w * h {
-        if removed[i] < cap && removed[i] < kept[i] {
-            if gray.as_raw()[i] != 255 {
-                count += 1;
-            }
-            gray.as_mut()[i] = 255;
-        }
-    }
     count
+        + gray
+            .par_iter_mut()
+            .zip(&removed)
+            .zip(&kept)
+            .enumerate()
+            .map(|(i, ((pixel, removed), kept))| {
+                let whiten = *removed < cap && removed < kept && *pixel != 255 && !frozen(i);
+                if whiten {
+                    *pixel = 255;
+                }
+                usize::from(whiten)
+            })
+            .sum::<usize>()
 }
 
 /// Remove faint perimeter strokes which never produced a Sauvola black core.
 /// Shape classification uses normalized gray, and protected music rectangles
-/// are restored exactly. No global inset or content crop is introduced.
+/// are never altered. No global inset or content crop is introduced.
 pub fn whiten_gray_border(
     gray: &mut GrayImage,
     contour: &[crate::geometry::Point],
@@ -136,40 +191,57 @@ pub(super) fn whiten_gray_border_impl(
     protected: &[[f64; 4]],
     prepared: Option<&PageBorder<'_>>,
 ) -> usize {
-    let before = gray.clone();
     let (w, h) = (gray.width() as usize, gray.height() as usize);
+    if w == 0
+        || h == 0
+        || margin == 0
+        || contour.len() < 3
+        || contour.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+    {
+        return 0;
+    }
     let protected_mask = protected_pixel_mask(w, h, protected);
-    let mut ink = vec![255; w * h];
-    ink.par_iter_mut()
-        .zip(gray.as_raw())
+    let ink = (gray.as_raw().par_iter())
         .zip(&protected_mask)
-        .for_each(|((out, tone), protected)| {
-            if *protected == 0 && *tone < 240 {
-                *out = 0;
+        .map(|(tone, protected)| {
+            if *protected == 0 && *tone < 255 {
+                0
+            } else {
+                255
             }
-        });
+        })
+        .collect();
     let raw = GrayImage::from_raw(gray.width(), gray.height(), ink).unwrap();
     let mut cleaned = raw.clone();
-    whiten_page_border_impl(
+    let mask = if let Some(prepared) = prepared {
+        Cow::Borrowed(
+            prepared
+                .mask
+                .get_or_init(|| page_mask(contour, w, h))
+                .as_slice(),
+        )
+    } else {
+        Cow::Owned(page_mask(contour, w, h))
+    };
+    // Use only confirmed rim shapes, not the binary path's eroded page mask:
+    // an uncertain contour must not shave faint print off the gray master.
+    remove_rim_components(
         &mut cleaned,
+        &mask,
         contour,
         margin,
         true,
         Some(gray.as_raw()),
         prepared,
     );
-    apply_binary_cleanup_impl(gray, &raw, &cleaned, Some(contour), prepared);
-    gray.as_mut()
-        .par_iter_mut()
-        .zip(before.as_raw())
-        .zip(&protected_mask)
-        .map(|((pixel, before), protected)| {
-            if *protected != 0 {
-                *pixel = *before;
-            }
-            usize::from(*pixel != *before)
-        })
-        .sum()
+    apply_binary_cleanup_impl(
+        gray,
+        &raw,
+        &cleaned,
+        Some(contour),
+        Some(&protected_mask),
+        prepared,
+    )
 }
 
 /// Rasterize the union once instead of testing every pixel against every music
@@ -213,7 +285,6 @@ pub(super) fn whiten_page_border_impl(
     gray_tone: Option<&[u8]>,
     prepared: Option<&PageBorder<'_>>,
 ) -> usize {
-    use std::collections::VecDeque;
     let (w, h) = (binary.width() as usize, binary.height() as usize);
     if contour.len() < 3
         || w == 0
@@ -245,79 +316,96 @@ pub(super) fn whiten_page_border_impl(
     } else {
         0
     };
-    let radius = margin as usize;
-    // Erode in output pixels; outside the raster is outside the page.
-    fn erode_line(input: &[u8], radius: usize) -> Vec<u8> {
-        let n = input.len();
-        let mut out = vec![0; n];
-        let mut zeros = VecDeque::new();
-        let mut right = 0;
-        for (i, value) in out.iter_mut().enumerate() {
-            let end = i.saturating_add(radius).saturating_add(1).min(n);
-            while right < end {
-                if input[right] == 0 {
-                    zeros.push_back(right);
-                }
-                right += 1;
-            }
-            let left = i.saturating_sub(radius);
-            while zeros.front().is_some_and(|j| *j < left) {
-                zeros.pop_front();
-            }
-            if i >= radius && i.saturating_add(radius) < n && zeros.is_empty() {
-                *value = 1;
-            }
-        }
-        out
+    if margin > 0 {
+        erode_mask(&mut mask, w, h, margin as usize);
     }
-    if radius > 0 {
-        let mut horizontal = vec![0; w * h];
-        horizontal
-            .par_chunks_mut(w)
-            .zip(mask.par_chunks(w))
-            .for_each(|(out, row)| out.copy_from_slice(&erode_line(row, radius)));
-        for x in 0..w {
-            let column: Vec<u8> = (0..h).map(|y| horizontal[y * w + x]).collect();
-            let result = erode_line(&column, radius);
-            for y in 0..h {
-                mask[y * w + x] = result[y];
+    removed += (binary.as_mut().par_chunks_mut(w))
+        .zip(mask.par_chunks(w))
+        .map(|(row, mask)| {
+            let mut removed = 0;
+            for (value, _) in row.iter_mut().zip(mask).filter(|(_, inside)| **inside == 0) {
+                removed += usize::from(*value == 0);
+                *value = 255;
             }
-        }
-    }
-    for (value, inside) in binary.as_mut().iter_mut().zip(&mask) {
-        if *inside == 0 {
-            if *value == 0 {
-                removed += 1;
-            }
-            *value = 255;
-        }
-    }
+            removed
+        })
+        .sum::<usize>();
     removed
 }
 
-fn page_mask(contour: &[crate::geometry::Point], w: usize, h: usize) -> Vec<u8> {
-    let mut mask = vec![0_u8; w * h];
-    for y in 0..h {
-        let yy = y as f64;
-        let mut cuts = vec![];
-        for (a, b) in contour
-            .iter()
-            .zip(contour.iter().cycle().skip(1))
-            .take(contour.len())
-        {
-            if (a.y > yy) != (b.y > yy) {
-                cuts.push(a.x + (yy - a.y) * (b.x - a.x) / (b.y - a.y));
+/// Square erosion in output pixels; outside the raster is outside the page.
+/// Rows lose `radius` pixels at both ends of every run. A pixel then survives
+/// when its column holds a full window of such survivors, tracked as run
+/// lengths so both passes stay sequential in memory.
+pub(super) fn erode_mask(mask: &mut [u8], w: usize, h: usize, radius: usize) {
+    let window = 2 * radius + 1;
+    mask.par_chunks_mut(w).for_each(|row| {
+        let mut x = 0;
+        while x < w {
+            let Some(run) = row[x..].iter().position(|v| *v != 0) else {
+                break;
+            };
+            let start = x + run;
+            let end = row[start..]
+                .iter()
+                .position(|v| *v == 0)
+                .map_or(w, |length| start + length);
+            if end - start < window {
+                row[start..end].fill(0);
+            } else {
+                row[start..start + radius].fill(0);
+                row[end - radius..end].fill(0);
             }
+            x = end;
         }
-        cuts.sort_by(f64::total_cmp);
-        for pair in cuts.chunks_exact(2) {
-            let start = pair[0].ceil().max(0.) as usize;
-            let end = (pair[1].floor() + 1.).max(0.) as usize;
-            if start < end.min(w) {
-                mask[y * w + start..y * w + end.min(w)].fill(1);
+    });
+    let mut runs = vec![0_u32; w];
+    for y in 0..h {
+        let (above, below) = mask.split_at_mut(y * w);
+        for (run, value) in runs.iter_mut().zip(&below[..w]) {
+            *run = if *value == 0 { 0 } else { *run + 1 };
+        }
+        if y >= 2 * radius {
+            // Row `y - radius` was consumed `radius` rows ago and is final now.
+            for (out, run) in above[(y - radius) * w..][..w].iter_mut().zip(&runs) {
+                *out = u8::from(*run as usize >= window);
             }
         }
     }
+    let edge = radius.min(h) * w;
+    mask[..edge].fill(0);
+    mask[h * w - edge..].fill(0);
+}
+
+pub(super) fn page_mask(contour: &[crate::geometry::Point], w: usize, h: usize) -> Vec<u8> {
+    // An end point lies above exactly the rows before `below`; an edge cuts
+    // the rows where only one of its end points does.
+    let below = |p: &crate::geometry::Point| (p.y.ceil().max(0.) as usize).min(h);
+    let mut cuts = vec![vec![]; h];
+    for (a, b) in contour
+        .iter()
+        .zip(contour.iter().cycle().skip(1))
+        .take(contour.len())
+    {
+        let (first, last) = (below(a).min(below(b)), below(a).max(below(b)));
+        for (y, cuts) in cuts.iter_mut().enumerate().take(last).skip(first) {
+            let yy = y as f64;
+            cuts.push(a.x + (yy - a.y) * (b.x - a.x) / (b.y - a.y));
+        }
+    }
+    let mut mask = vec![0_u8; w * h];
+    mask.par_chunks_mut(w.max(1))
+        .zip(cuts)
+        .for_each(|(row, mut cuts)| {
+            cuts.sort_by(f64::total_cmp);
+            for pair in cuts.chunks_exact(2) {
+                let start = pair[0].ceil().max(0.) as usize;
+                let end = (pair[1].floor() + 1.).max(0.) as usize;
+                if start < end.min(w) {
+                    row[start..end.min(w)].fill(1);
+                }
+            }
+        });
     mask
 }
 
@@ -334,33 +422,50 @@ fn remove_rim_components(
     prepared: Option<&PageBorder<'_>>,
 ) -> usize {
     let (w, h) = (binary.width() as usize, binary.height() as usize);
-    let band = ((w.min(h) as f64 * 0.04).ceil() as u16).max(2);
+    let band = rim_band(w, h);
     let cap = band + 1;
     let close_band = (margin.saturating_mul(3).min(u32::from(band))) as u16;
     let distance = if let Some(prepared) = prepared {
         Cow::Borrowed(
             prepared
                 .rim
-                .get_or_init(|| rim_distance(mask, contour, w, h, cap, Some(prepared)))
+                .get_or_init(|| rim_distance(mask, contour, w, h, cap))
                 .as_slice(),
         )
     } else {
-        Cow::Owned(rim_distance(mask, contour, w, h, cap, prepared))
+        Cow::Owned(rim_distance(mask, contour, w, h, cap))
     };
-    let mut seen = vec![false; w * h];
+    // 1: unvisited ink within the band. 2: ink beyond it, which disqualifies
+    // any component it touches; gray cleanup instead cuts components there.
+    let mut state: Vec<u8> = binary
+        .as_raw()
+        .par_iter()
+        .zip(distance.par_iter())
+        .map(|(ink, distance)| match (*ink, *distance <= band) {
+            (0, true) => 1,
+            (0, false) if !gray_frames => 2,
+            _ => 0,
+        })
+        .collect();
+    let corners = CORNERS.map(|(sx, sy)| {
+        contour
+            .iter()
+            .max_by(|a, b| (sx * a.x + sy * a.y).total_cmp(&(sx * b.x + sy * b.y)))
+            .unwrap()
+    });
     let mut component = vec![];
-    let mut confirmed = vec![];
+    let short = w.min(h);
+    let gap = (short / 12).max(8);
+    let mut confirmed = RimSupport::new(w, h, gap, cap);
     let mut pending: Vec<Vec<usize>> = vec![];
     let mut corner_fragments = vec![];
     let mut removed = 0;
-    let short = w.min(h);
-    for seed in 0..w * h {
-        if seen[seed] || binary.as_raw()[seed] != 0 || (gray_frames && distance[seed] > band) {
-            continue;
-        }
+    let mut next = 0;
+    while let Some(seed) = find_from(&state, 1, next) {
+        next = seed + 1;
         component.clear();
         component.push(seed);
-        seen[seed] = true;
+        state[seed] = 0;
         let (mut min_x, mut max_x, mut min_y, mut max_y) = (w, 0, h, 0);
         let mut entirely_near = true;
         let mut max_distance = 0;
@@ -373,15 +478,17 @@ fn remove_rim_components(
             max_x = max_x.max(x);
             min_y = min_y.min(y);
             max_y = max_y.max(y);
-            entirely_near &= distance[i] <= band;
             max_distance = max_distance.max(distance[i]);
             for yy in y.saturating_sub(1)..=(y + 1).min(h - 1) {
                 for xx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
                     let j = yy * w + xx;
-                    if !seen[j] && binary.as_raw()[j] == 0 && (!gray_frames || distance[j] <= band)
-                    {
-                        seen[j] = true;
-                        component.push(j);
+                    match state[j] {
+                        1 => {
+                            state[j] = 0;
+                            component.push(j);
+                        }
+                        2 => entirely_near = false,
+                        _ => {}
                     }
                 }
             }
@@ -412,13 +519,13 @@ fn remove_rim_components(
             && (elongated || curved_frame || multi_side_frame);
         let corner_wedge = gray_frames
             && entirely_near
-            && is_corner_wedge(&component, w, [min_x, min_y, max_x, max_y], contour, band);
+            && is_corner_wedge(&component, w, [min_x, min_y, max_x, max_y], corners, band);
         if corner_wedge {
             corner_fragments.push([min_x, min_y, max_x, max_y]);
         }
         if entirely_near && (tiny_edge_fleck || boundary_stroke || corner_wedge) {
             if corner_wedge || (boundary_stroke && span >= short / 10) {
-                confirmed.extend(component.iter().copied());
+                confirmed.extend(&component, &distance);
             }
             for &i in &component {
                 binary.as_mut()[i] = 255;
@@ -431,9 +538,10 @@ fn remove_rim_components(
     // Several character-sized faint fragments can collectively establish a
     // broken rim. Keep that evidence separate: it must not authorize removal
     // of a dark folio or lyric merely because it lies in the same normal strip.
+    let tangents = ContourTangents::new(contour);
     let chain_seed = gray_tone
-        .map(|tone| gray_fragment_chains(&pending, tone, contour, w, short, margin, &distance));
-    let mut chain_confirmed = vec![];
+        .map(|tone| gray_fragment_chains(&pending, tone, &tangents, w, short, margin, &distance));
+    let mut chain_confirmed = RimSupport::new(w, h, gap, cap);
     if let Some(seeds) = chain_seed {
         let mut index = 0;
         pending.retain(|points| {
@@ -444,7 +552,7 @@ fn remove_rim_components(
                     binary.as_mut()[i] = 255;
                 }
                 removed += points.len();
-                chain_confirmed.extend(points.iter().copied());
+                chain_confirmed.extend(points, &distance);
             }
             !accepted
         });
@@ -452,97 +560,91 @@ fn remove_rim_components(
     // Recover short strokes interrupted by white gaps, but only when they
     // continue a confirmed long rim in the same narrow normal-distance strip.
     // Compact isolated numerals have no supporting rim and remain untouched.
-    let gap = (short / 12).max(8);
+    // Shape and position never change between passes; only the support grows.
+    struct Candidate {
+        points: Vec<usize>,
+        reach: [usize; 4],
+        levels: Vec<u64>,
+        faint: bool,
+    }
+    let pad = margin.max(2) as usize;
+    let mut candidates = vec![];
+    for points in pending {
+        // Thin detached paper fibers immediately beside an accepted solid
+        // corner inherit that evidence, but compact nearby glyphs do not.
+        let min_x = points.iter().map(|i| i % w).min().unwrap();
+        let max_x = points.iter().map(|i| i % w).max().unwrap();
+        let min_y = points.iter().map(|i| i / w).min().unwrap();
+        let max_y = points.iter().map(|i| i / w).max().unwrap();
+        let (bw, bh) = (max_x - min_x + 1, max_y - min_y + 1);
+        let corner_fiber = bw.min(bh) <= pad
+            && (bw.max(bh) >= 3 * bw.min(bh) || points.len() <= 8)
+            && corner_fragments.iter().any(|[x0, y0, x1, y1]| {
+                min_x >= x0.saturating_sub(pad)
+                    && min_y >= y0.saturating_sub(pad)
+                    && max_x <= x1.saturating_add(pad)
+                    && max_y <= y1.saturating_add(pad)
+            });
+        if corner_fiber {
+            for &i in &points {
+                binary.as_mut()[i] = 255;
+            }
+            removed += points.len();
+            continue;
+        }
+        let n = points.len() as f64;
+        let cx = points.iter().map(|i| (i % w) as f64).sum::<f64>() / n;
+        let cy = points.iter().map(|i| (i / w) as f64).sum::<f64>() / n;
+        let (tx, ty) = tangents.nearest(cx, cy);
+        let (mut along, mut across) = (0., 0.);
+        for &i in &points {
+            let dx = (i % w) as f64 - cx;
+            let dy = (i / w) as f64 - cy;
+            along += (dx * tx + dy * ty).powi(2);
+            across += (-dx * ty + dy * tx).powi(2);
+        }
+        if points.len() < 3 || along < 2. * across || along / n < 2. {
+            continue;
+        }
+        let normal = points.iter().map(|i| f64::from(distance[*i])).sum::<f64>() / n;
+        let mut levels = vec![0_u64; confirmed.words];
+        for level in 0..=cap {
+            if (f64::from(level) - normal).abs() <= f64::from(margin.max(2)) {
+                levels[usize::from(level) / 64] |= 1 << (level % 64);
+            }
+        }
+        candidates.push(Candidate {
+            reach: [
+                min_x.saturating_sub(gap),
+                min_y.saturating_sub(gap),
+                max_x.saturating_add(gap).min(w - 1),
+                max_y.saturating_add(gap).min(h - 1),
+            ],
+            levels,
+            faint: gray_tone.is_some_and(|tone| faint_fragment_tone(&points, tone).is_some()),
+            points,
+        });
+    }
     loop {
         let mut changed = false;
-        pending.retain(|points| {
-            // Thin detached paper fibers immediately beside an accepted solid
-            // corner inherit that evidence, but compact nearby glyphs do not.
-            let min_x = points.iter().map(|i| i % w).min().unwrap();
-            let max_x = points.iter().map(|i| i % w).max().unwrap();
-            let min_y = points.iter().map(|i| i / w).min().unwrap();
-            let max_y = points.iter().map(|i| i / w).max().unwrap();
-            let (bw, bh) = (max_x - min_x + 1, max_y - min_y + 1);
-            let pad = margin.max(2) as usize;
-            let corner_fiber = bw.min(bh) <= pad
-                && (bw.max(bh) >= 3 * bw.min(bh) || points.len() <= 8)
-                && corner_fragments.iter().any(|[x0, y0, x1, y1]| {
-                    min_x >= x0.saturating_sub(pad)
-                        && min_y >= y0.saturating_sub(pad)
-                        && max_x <= x1.saturating_add(pad)
-                        && max_y <= y1.saturating_add(pad)
-                });
-            if corner_fiber {
-                for &i in points {
-                    binary.as_mut()[i] = 255;
-                }
-                removed += points.len();
-                changed = true;
-                return false;
-            }
-            let n = points.len() as f64;
-            let cx = points.iter().map(|i| (i % w) as f64).sum::<f64>() / n;
-            let cy = points.iter().map(|i| (i / w) as f64).sum::<f64>() / n;
-            let mut tangent = (0., 0.);
-            let mut closest = f64::INFINITY;
-            for (a, b) in contour
-                .iter()
-                .zip(contour.iter().cycle().skip(1))
-                .take(contour.len())
-            {
-                let dx = b.x - a.x;
-                let dy = b.y - a.y;
-                let norm = dx * dx + dy * dy;
-                if norm < 1e-9 {
-                    continue;
-                }
-                let t = (((cx - a.x) * dx + (cy - a.y) * dy) / norm).clamp(0., 1.);
-                let d = (cx - a.x - t * dx).powi(2) + (cy - a.y - t * dy).powi(2);
-                if d < closest {
-                    closest = d;
-                    let length = norm.sqrt();
-                    tangent = (dx / length, dy / length);
-                }
-            }
-            let (tx, ty) = tangent;
-            let (mut along, mut across) = (0., 0.);
-            for &i in points {
-                let dx = (i % w) as f64 - cx;
-                let dy = (i / w) as f64 - cy;
-                along += (dx * tx + dy * ty).powi(2);
-                across += (-dx * ty + dy * tx).powi(2);
-            }
-            if points.len() < 3 || along < 2. * across || along / n < 2. {
-                return true;
-            }
-            let normal = points.iter().map(|i| f64::from(distance[*i])).sum::<f64>() / n;
-            let minx = points.iter().map(|i| i % w).min().unwrap();
-            let maxx = points.iter().map(|i| i % w).max().unwrap();
-            let miny = points.iter().map(|i| i / w).min().unwrap();
-            let maxy = points.iter().map(|i| i / w).max().unwrap();
-            let supported_by = |support: &[usize]| {
-                support.iter().any(|&i| {
-                    let (x, y) = (i % w, i / w);
-                    x.saturating_add(gap) >= minx
-                        && x <= maxx.saturating_add(gap)
-                        && y.saturating_add(gap) >= miny
-                        && y <= maxy.saturating_add(gap)
-                        && (f64::from(distance[i]) - normal).abs() <= f64::from(margin.max(2))
-                })
-            };
-            let supported = supported_by(&confirmed);
-            let chain_supported = gray_tone
-                .is_some_and(|tone| faint_fragment_tone(points, tone).is_some())
-                && supported_by(&chain_confirmed);
+        candidates.retain(|candidate| {
+            let Candidate {
+                points,
+                reach,
+                levels,
+                faint,
+            } = candidate;
+            let supported = confirmed.supports(*reach, levels, &distance);
+            let chain_supported = *faint && chain_confirmed.supports(*reach, levels, &distance);
             if supported || chain_supported {
                 for &i in points {
                     binary.as_mut()[i] = 255;
                 }
                 removed += points.len();
                 if supported {
-                    confirmed.extend(points.iter().copied());
+                    confirmed.extend(points, &distance);
                 } else {
-                    chain_confirmed.extend(points.iter().copied());
+                    chain_confirmed.extend(points, &distance);
                 }
                 changed = true;
                 false
@@ -555,6 +657,160 @@ fn remove_rim_components(
         }
     }
     removed
+}
+
+/// Confirmed rim pixels in a coarse grid that records which rim distances each
+/// cell holds. A box query then reads pixels only in cells that straddle the
+/// box edge and contain a matching distance.
+struct RimSupport {
+    cell: usize,
+    columns: usize,
+    width: usize,
+    words: usize,
+    levels: Vec<u64>,
+    pixels: Vec<Vec<usize>>,
+}
+
+impl RimSupport {
+    fn new(w: usize, h: usize, gap: usize, cap: u16) -> Self {
+        let cell = (gap / 4).max(1);
+        let columns = w.div_ceil(cell);
+        let cells = columns * h.div_ceil(cell);
+        let words = usize::from(cap) / 64 + 1;
+        Self {
+            cell,
+            columns,
+            width: w,
+            words,
+            levels: vec![0; cells * words],
+            pixels: vec![vec![]; cells],
+        }
+    }
+
+    fn extend(&mut self, points: &[usize], distance: &[u16]) {
+        for &i in points {
+            let cell = (i / self.width / self.cell) * self.columns + i % self.width / self.cell;
+            let level = usize::from(distance[i]);
+            self.levels[cell * self.words + level / 64] |= 1 << (level % 64);
+            self.pixels[cell].push(i);
+        }
+    }
+
+    /// Whether any pixel inside the inclusive box lies at one of `levels`.
+    fn supports(&self, [x0, y0, x1, y1]: [usize; 4], levels: &[u64], distance: &[u16]) -> bool {
+        let cell = self.cell;
+        (y0 / cell..=y1 / cell).any(|row| {
+            (x0 / cell..=x1 / cell).any(|column| {
+                let index = row * self.columns + column;
+                let held = &self.levels[index * self.words..][..self.words];
+                if held.iter().zip(levels).all(|(a, b)| a & b == 0) {
+                    return false;
+                }
+                let inside = column * cell >= x0
+                    && row * cell >= y0
+                    && (column + 1) * cell <= x1 + 1
+                    && (row + 1) * cell <= y1 + 1;
+                inside
+                    || self.pixels[index].iter().any(|&i| {
+                        let (x, y) = (i % self.width, i / self.width);
+                        let level = usize::from(distance[i]);
+                        (x0..=x1).contains(&x)
+                            && (y0..=y1).contains(&y)
+                            && levels[level / 64] >> (level % 64) & 1 != 0
+                    })
+            })
+        })
+    }
+}
+
+/// Nearest-segment tangents of a closed contour. Segments are grouped into
+/// runs with bounding boxes; a run that cannot beat the best distance is
+/// skipped, and the rest are scanned in contour order so ties resolve exactly
+/// as in a full scan.
+struct ContourTangents<'a> {
+    contour: &'a [crate::geometry::Point],
+    runs: Vec<[f64; 4]>,
+}
+
+impl<'a> ContourTangents<'a> {
+    const RUN: usize = 32;
+
+    fn new(contour: &'a [crate::geometry::Point]) -> Self {
+        let runs = (0..contour.len())
+            .step_by(Self::RUN)
+            .map(|start| {
+                let end = (start + Self::RUN).min(contour.len());
+                (start..=end).map(|i| &contour[i % contour.len()]).fold(
+                    [
+                        f64::INFINITY,
+                        f64::INFINITY,
+                        f64::NEG_INFINITY,
+                        f64::NEG_INFINITY,
+                    ],
+                    |[x0, y0, x1, y1], p| [x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)],
+                )
+            })
+            .collect();
+        Self { contour, runs }
+    }
+
+    /// Unit tangent of the first segment at minimal distance from the point.
+    fn nearest(&self, cx: f64, cy: f64) -> (f64, f64) {
+        let n = self.contour.len();
+        let scan = |run: usize, closest: &mut f64, tangent: &mut (f64, f64)| {
+            for i in run * Self::RUN..((run + 1) * Self::RUN).min(n) {
+                let (a, b) = (&self.contour[i], &self.contour[(i + 1) % n]);
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let norm = dx * dx + dy * dy;
+                if norm < 1e-9 {
+                    continue;
+                }
+                let t = (((cx - a.x) * dx + (cy - a.y) * dy) / norm).clamp(0., 1.);
+                let d = (cx - a.x - t * dx).powi(2) + (cy - a.y - t * dy).powi(2);
+                if d < *closest {
+                    *closest = d;
+                    let length = norm.sqrt();
+                    *tangent = (dx / length, dy / length);
+                }
+            }
+        };
+        let floor = |[x0, y0, x1, y1]: &[f64; 4]| {
+            let dx = (x0 - cx).max(cx - x1).max(0.);
+            let dy = (y0 - cy).max(cy - y1).max(0.);
+            dx * dx + dy * dy
+        };
+        let mut limit = f64::INFINITY;
+        if let Some(first) = (0..self.runs.len())
+            .min_by(|a, b| floor(&self.runs[*a]).total_cmp(&floor(&self.runs[*b])))
+        {
+            scan(first, &mut limit, &mut (0., 0.));
+        }
+        // The slack dwarfs rounding in the segment distance, so a skipped run
+        // could never have supplied the minimum.
+        let limit = limit * (1. + 1e-6) + 1e-6;
+        let mut closest = f64::INFINITY;
+        let mut tangent = (0., 0.);
+        for (run, bounds) in self.runs.iter().enumerate() {
+            if floor(bounds) <= limit {
+                scan(run, &mut closest, &mut tangent);
+            }
+        }
+        tangent
+    }
+}
+
+/// Index of the first `value` at or after `from`. Blocks are tested as a
+/// whole first because matches are sparse in page-sized rasters.
+fn find_from(values: &[u8], value: u8, from: usize) -> Option<usize> {
+    let mut start = from;
+    for block in values[from..].chunks(64) {
+        if block.contains(&value) {
+            return block.iter().position(|v| *v == value).map(|i| start + i);
+        }
+        start += block.len();
+    }
+    None
 }
 
 fn faint_fragment_tone(points: &[usize], tone: &[u8]) -> Option<f64> {
@@ -571,7 +827,7 @@ fn faint_fragment_tone(points: &[usize], tone: &[u8]) -> Option<f64> {
 fn gray_fragment_chains(
     pending: &[Vec<usize>],
     tone: &[u8],
-    contour: &[crate::geometry::Point],
+    tangents: &ContourTangents<'_>,
     w: usize,
     short: usize,
     margin: u32,
@@ -595,26 +851,7 @@ fn gray_fragment_chains(
             points.iter().map(|i| (i % w) as f64).sum::<f64>() / n,
             points.iter().map(|i| (i / w) as f64).sum::<f64>() / n,
         );
-        let mut tangent = (0., 0.);
-        let mut closest = f64::INFINITY;
-        for (a, b) in contour
-            .iter()
-            .zip(contour.iter().cycle().skip(1))
-            .take(contour.len())
-        {
-            let (dx, dy) = (b.x - a.x, b.y - a.y);
-            let norm = dx * dx + dy * dy;
-            if norm < 1e-9 {
-                continue;
-            }
-            let t = (((center.0 - a.x) * dx + (center.1 - a.y) * dy) / norm).clamp(0., 1.);
-            let d = (center.0 - a.x - t * dx).powi(2) + (center.1 - a.y - t * dy).powi(2);
-            if d < closest {
-                closest = d;
-                let length = norm.sqrt();
-                tangent = (dx / length, dy / length);
-            }
-        }
+        let tangent = tangents.nearest(center.0, center.1);
         let (mut lo, mut hi, mut nl, mut nh) = (
             f64::INFINITY,
             f64::NEG_INFINITY,
@@ -729,13 +966,16 @@ fn gray_fragment_chains(
     accepted
 }
 
+/// Diagonal directions whose extreme contour points are the page corners.
+const CORNERS: [(f64, f64); 4] = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)];
+
 /// Solid tapered corner fragments differ from compact printed glyphs: they
 /// have two long outer legs facing a real contour corner and almost no holes.
 fn is_corner_wedge(
     pixels: &[usize],
     width: usize,
     bounds: [usize; 4],
-    contour: &[crate::geometry::Point],
+    corners: [&crate::geometry::Point; 4],
     band: u16,
 ) -> bool {
     let [x0, y0, x1, y1] = bounds;
@@ -745,18 +985,12 @@ fn is_corner_wedge(
     {
         return false;
     }
-    let near_corner = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)]
-        .iter()
-        .any(|&(sx, sy)| {
-            let corner = contour
-                .iter()
-                .max_by(|a, b| (sx * a.x + sy * a.y).total_cmp(&(sx * b.x + sy * b.y)))
-                .unwrap();
-            let nx = if sx < 0. { x0 } else { x1 };
-            let ny = if sy < 0. { y0 } else { y1 };
-            (nx as f64 - corner.x).abs() <= (2 * band) as f64
-                && (ny as f64 - corner.y).abs() <= (2 * band) as f64
-        });
+    let near_corner = CORNERS.iter().zip(corners).any(|(&(sx, sy), corner)| {
+        let nx = if sx < 0. { x0 } else { x1 };
+        let ny = if sy < 0. { y0 } else { y1 };
+        (nx as f64 - corner.x).abs() <= (2 * band) as f64
+            && (ny as f64 - corner.y).abs() <= (2 * band) as f64
+    });
     if near_corner && solid_triangle(pixels, width) {
         return true;
     }
@@ -777,13 +1011,7 @@ fn is_corner_wedge(
         return false;
     }
     let tolerance = (band / 20).max(2);
-    for (sx, sy) in [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)] {
-        let Some(corner) = contour
-            .iter()
-            .max_by(|a, b| (sx * a.x + sy * a.y).total_cmp(&(sx * b.x + sy * b.y)))
-        else {
-            continue;
-        };
+    for ((sx, sy), corner) in CORNERS.into_iter().zip(corners) {
         let near_x = if sx < 0. { x0 } else { x1 };
         let near_y = if sy < 0. { y0 } else { y1 };
         if (near_x as f64 - corner.x).abs() > band as f64

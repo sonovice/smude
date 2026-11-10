@@ -1,0 +1,27 @@
+name: SmudeNativeTests
+options:
+  deploymentTarget:
+    iOS: '15.0'
+targets:
+  SmudeNativeTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+      - path: .
+        name: NativeControls
+        includes: [ControlsView.swift]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gridnotelabs.smude.design.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: '5.0'
+        DEVELOPMENT_TEAM: 76CP95AA8F
+schemes:
+  SmudeNativeTests:
+    build:
+      targets:
+        SmudeNativeTests: [test]
+    test:
+      targets: [SmudeNativeTests]
+      gatherCoverageData: false

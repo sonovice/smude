@@ -575,11 +575,13 @@ mod layout_tests {
                     result: ProcessingResult {
                         pages: vec![
                             RenderedPage {
+                                quality: Default::default(),
                                 id: "1".into(),
                                 mapping: None,
                                 directory: "unused".into(),
                             },
                             RenderedPage {
+                                quality: Default::default(),
                                 id: "2".into(),
                                 mapping: None,
                                 directory: "unused".into(),

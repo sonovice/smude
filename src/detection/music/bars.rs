@@ -5,7 +5,7 @@ struct Candidate {
     bar: Barline,
     width: f64,
     clean: f64,
-    extension: f64,
+    extension: [f64; 2],
 }
 fn stroke(
     ink: &Ink,
@@ -18,6 +18,10 @@ fn stroke(
     let space = (bottom - top) / 4.;
     let mid = (top + bottom) / 2.;
     let reach = (space * 0.65).round().max(3.) as i64;
+    // At small spacings, blur plus thresholding can make a genuine bar four
+    // pixels wide. Outer-end extension and cross-staff gap checks distinguish
+    // it from note stems; a three-pixel cap loses photographed bars.
+    let max_width = 4_f64.max(space * 0.5);
     let mut points = vec![];
     let mut widths = vec![];
     let mut eligible = 0;
@@ -27,7 +31,7 @@ fn stroke(
         if
         // The antialiased horizontal attachment can extend almost two
         // pixels from its detected centre at an eight-pixel staff spacing.
-        (phase - phase.round()).abs() <= 0.22 {
+        (phase - phase.round()).abs() * space <= (0.22 * space).max(1.25) {
             continue;
         }
         eligible += 1;
@@ -47,7 +51,7 @@ fn stroke(
             let c = (left + right) as f64 / 2.;
             if left > -reach
                 && right < reach
-                && width <= 3_f64.max(space * 0.5)
+                && width <= max_width
                 && best.is_none_or(|(old, _)| c.abs() < old.abs())
             {
                 best = Some((c, width));
@@ -62,7 +66,8 @@ fn stroke(
             widths.push(width);
         }
     }
-    if points.len() < 8 || points.len() as f64 / (eligible as f64) < 0.9 {
+    let minimum_samples = eligible.clamp(4, 8);
+    if points.len() < minimum_samples || points.len() as f64 / (eligible as f64) < 0.9 {
         return None;
     }
     let mut fit_slope = slope(&points);
@@ -82,7 +87,7 @@ fn stroke(
             .copied()
             .filter(|p| (p.x - intercept - fit_slope * (p.y - mid)).abs() <= limit)
             .collect();
-        if kept.len() < 8 {
+        if kept.len() < minimum_samples {
             return None;
         }
         fit_slope = slope(&kept);
@@ -110,7 +115,7 @@ fn stroke(
         while b + 1 < ink.w as i64 && ink.at((b + 1) as f64, p.y) > 0. && b as f64 - x < space {
             b += 1;
         }
-        if (b - a + 1) as f64 <= 3_f64.max(space * 0.5) {
+        if (b - a + 1) as f64 <= max_width {
             clean += 1;
         }
     }
@@ -118,15 +123,15 @@ fn stroke(
     if clean < 0.82 {
         return None;
     }
-    let mut extension = 0_f64;
-    for (end, dir) in [(top, -1.), (bottom, 1.)] {
+    let mut extension = [0_f64; 2];
+    for (i, (end, dir)) in [(top, -1.), (bottom, 1.)].into_iter().enumerate() {
         let count = (0..12)
             .filter(|j| {
                 let y = end + dir * (0.3 + 0.55 * (*j as f64) / 11.) * space;
                 ink.nearby(intercept + fit_slope * (y - mid), y) > 0.
             })
             .count();
-        extension = extension.max(count as f64 / 12.);
+        extension[i] = count as f64 / 12.;
     }
     let y: Vec<f64> = (top.round() as i64..=bottom.round() as i64)
         .map(|v| v as f64)
@@ -269,24 +274,31 @@ pub(super) fn bars(ink: &Ink, staves: &[Staff], sx: f64, sy: f64) -> Vec<Barline
                         * sy
                 });
                 let mid = (lines[0] + lines[4]) / 2.;
+                let samples: [[f64; 12]; 4] = std::array::from_fn(|k| {
+                    std::array::from_fn(|i| {
+                        let t = 0.2 + 0.6 * i as f64 / 11.;
+                        lines[k] * (1. - t) + lines[k + 1] * t
+                    })
+                });
                 let mut best = (0_f64, 0_f64);
                 for j in -8..=8 {
                     let s = j as f64 * 0.025;
-                    let mut all = 0_f64;
-                    let mut minimum = 1_f64;
-                    for k in 0..4 {
-                        let sum = (0..12)
-                            .map(|i| {
-                                let t = 0.2 + 0.6 * i as f64 / 11.;
-                                let y = lines[k] * (1. - t) + lines[k + 1] * t;
-                                ink.nearby(x as f64 + s * (y - mid), y)
-                            })
-                            .sum::<f64>()
-                            / 12.;
-                        minimum = minimum.min(sum);
-                        all += sum / 4.;
-                    }
-                    if minimum >= 0.8 && (all > best.0 || (all == best.0 && s.abs() < best.1.abs()))
+                    // A proposal needs ink at 0.8 of the samples in each of the
+                    // four spaces: a third blank sample anywhere settles it.
+                    let all = samples.iter().try_fold(0_f64, |all, space| {
+                        let mut blank = 0;
+                        for y in space {
+                            if ink.nearby(x as f64 + s * (y - mid), *y) == 0. {
+                                blank += 1;
+                                if blank > 2 {
+                                    return None;
+                                }
+                            }
+                        }
+                        Some(all + f64::from(12 - blank) / 12. / 4.)
+                    });
+                    if let Some(all) = all
+                        && (all > best.0 || (all == best.0 && s.abs() < best.1.abs()))
                     {
                         best = (all, s);
                     }
@@ -355,7 +367,14 @@ pub(super) fn bars(ink: &Ink, staves: &[Staff], sx: f64, sy: f64) -> Vec<Barline
         if previous[i].is_some() {
             continue;
         }
-        if next[i].is_none() && (c.extension > 0.7 || c.clean < 0.95) {
+        let mut last = i;
+        while let Some(j) = next[last] {
+            last = j;
+        }
+        if c.extension[0] > 0.7
+            || candidates[last].extension[1] > 0.7
+            || (next[i].is_none() && c.clean < 0.95)
+        {
             continue;
         }
         let mut b = c.bar.clone();
@@ -424,6 +443,28 @@ mod tests {
         }
     }
     #[test]
+    fn low_resolution_staff_intersections_leave_few_but_sufficient_bar_samples() {
+        let (mut ink, _) = fixture(&[]);
+        let staff = Staff {
+            x: vec![32., 215.],
+            y: std::array::from_fn(|k| vec![42. + k as f64 * 4.; 2]),
+        };
+        for row in &staff.y {
+            for x in 32..216 {
+                for dy in 0..2 {
+                    ink.pixels[(row[0] as usize + dy) * ink.w + x] = 1.;
+                }
+            }
+        }
+        vertical(&mut ink, 90, 42, 59, 1);
+        let found = bars(&ink, &[staff], 1., 1.);
+        assert!(
+            found.iter().any(|b| (median(b.x.clone()) - 90.).abs() < 1.),
+            "{found:?}"
+        );
+    }
+
+    #[test]
     fn full_three_staff_stroke_retains_gap_ink_without_duplicate_segments() {
         let (mut ink, staves) = fixture(&[60., 130., 200.]);
         vertical(&mut ink, 90, 44, 216, 2);
@@ -441,6 +482,20 @@ mod tests {
             1
         );
     }
+    #[test]
+    fn connected_cross_staff_stem_with_outer_extension_is_not_a_bar() {
+        let (mut ink, staves) = fixture(&[60., 130.]);
+        // A continuous shaft crosses both staffs, but continues to an outer
+        // notehead rather than terminating at the outer staff rules.
+        vertical(&mut ink, 100, 28, 146, 2);
+        for y in 26..33 {
+            for x in 94..103 {
+                ink.pixels[y * ink.w + x] = 1.;
+            }
+        }
+        assert!(bars(&ink, &staves, 1., 1.).is_empty());
+    }
+
     #[test]
     fn aligned_disconnected_extended_stems_are_not_system_barlines() {
         let (mut ink, staves) = fixture(&[60., 130.]);

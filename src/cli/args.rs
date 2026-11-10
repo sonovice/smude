@@ -33,7 +33,7 @@ pub(super) enum RenderBackend {
 #[command(
     name = "smude-v2",
     version,
-    about = "Native GCS and staff-driven rectification with default ONNX page detection"
+    about = "Staff-driven mesh rectification with default ONNX page detection"
 )]
 pub(super) struct Args {
     /// Also write source/analysis images and color, grayscale and binary variants.
@@ -82,6 +82,12 @@ pub(super) struct Args {
     /// Disable native GCS and retain the projective/local geometry comparison.
     #[arg(long)]
     pub(super) no_gcs: bool,
+    /// Explicitly select the default page/staff/direction mesh.
+    #[arg(long, conflicts_with_all = ["no_gcs", "gcs", "no_perspective"])]
+    pub(super) direction_mesh: bool,
+    /// Use the native GCS model instead of the default mesh.
+    #[arg(long, conflicts_with_all = ["no_gcs", "direction_mesh", "no_perspective"])]
+    pub(super) gcs: bool,
     /// Disable the default bounded, evidence-gated x-only system correction.
     #[arg(long)]
     pub(super) no_vertical_correction: bool,
@@ -129,6 +135,9 @@ pub(super) struct Args {
     /// Retain the full reconstructed canvas instead of final page/content framing.
     #[arg(long)]
     pub(super) no_final_crop: bool,
+    /// Disable automatic A4 framing for DIN-like page estimates.
+    #[arg(long)]
+    pub(super) no_a4: bool,
     /// Frame the detected paper (default), or explicitly crop tightly to ink.
     #[arg(long, value_enum, default_value = "page")]
     pub(super) crop_mode: CropMode,
@@ -144,6 +153,7 @@ impl From<Args> for smude_geometry::application::Options {
     fn from(args: Args) -> Self {
         use smude_geometry::application as engine;
         Self {
+            processing_progress: None,
             progress: None,
             diagnostics: args.diagnostics,
             geometry: args.geometry,
@@ -168,6 +178,8 @@ impl From<Args> for smude_geometry::application::Options {
             perspective: args.perspective,
             no_perspective: args.no_perspective,
             no_gcs: args.no_gcs,
+            direction_mesh: args.direction_mesh
+                || !(args.gcs || args.no_gcs || args.no_perspective),
             no_vertical_correction: args.no_vertical_correction,
             page_perspective: args.page_perspective,
             no_page_perspective: args.no_page_perspective,
@@ -188,6 +200,7 @@ impl From<Args> for smude_geometry::application::Options {
             analysis_width: args.analysis_width,
             binary_page_margin: args.binary_page_margin,
             no_final_crop: args.no_final_crop,
+            no_a4: args.no_a4,
             crop_mode: match args.crop_mode {
                 CropMode::Page => engine::CropMode::Page,
                 CropMode::Content => engine::CropMode::Content,
@@ -269,6 +282,23 @@ mod output_defaults_tests {
         assert!(parse(&["--pages"]).unwrap().uses_page_mode());
         assert!(parse(&["--pages", "--no-pages"]).is_err());
         assert!(parse(&["--no-pages", "--page-regions", "regions.json"]).is_err());
+    }
+
+    #[test]
+    fn mesh_is_default_with_explicit_gcs_and_legacy_ablations() {
+        let parse = |flags: &[&str]| {
+            let mut command = vec!["smude-v2", "--image", "source.png", "--out", "result"];
+            command.extend_from_slice(flags);
+            Args::try_parse_from(command).map(Options::from)
+        };
+        assert!(Options::default().direction_mesh);
+        assert!(parse(&[]).unwrap().direction_mesh);
+        assert!(parse(&["--direction-mesh"]).unwrap().direction_mesh);
+        assert!(!parse(&["--gcs"]).unwrap().direction_mesh);
+        assert!(!parse(&["--no-gcs"]).unwrap().direction_mesh);
+        assert!(!parse(&["--no-perspective"]).unwrap().direction_mesh);
+        assert!(parse(&["--gcs", "--direction-mesh"]).is_err());
+        assert!(parse(&["--gcs", "--no-gcs"]).is_err());
     }
 
     #[test]

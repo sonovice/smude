@@ -16,13 +16,18 @@ pub use composition::GcsPipelineReport;
 #[cfg(feature = "render")]
 pub use corrections::TextWarpReport;
 pub use corrections::{
-    BoundaryColumn, ConditioningReport, StaffConditioningReport, StaffEndpointRejection,
-    StaffExtensionReport, VerticalCorrection, condition_staff_observations,
+    BoundaryColumn, ConditioningReport, DirectionMesh, DirectionMeshReport,
+    StaffConditioningReport, StaffEndpointRejection, StaffExtensionReport, VerticalCorrection,
+    condition_staff_observations,
 };
+#[cfg(feature = "render")]
+pub use fit::GcsFitEvidence;
 pub use fit::Geometry;
+#[cfg(feature = "render")]
+pub use fit::MeshPipelineReport;
 #[cfg(feature = "render")]
 pub use models::PageAnalysisMap;
 pub use models::{GcsMap, GcsParameters, GcsReport, PerspectiveReport};
 pub use observations::{Barline, Observations, Staff, StaffEdge, StaffEdgeSide};
 pub use report::{ExtrapolationReport, FitProfile, Report, SystemReport, Validation};
-pub use types::{Config, Point};
+pub use types::{Config, Point, VerticalPath};

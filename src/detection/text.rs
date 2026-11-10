@@ -5,13 +5,13 @@ use std::collections::VecDeque;
 
 use crate::geometry::Point;
 use image::{GrayImage, imageops};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::rendering::output::binarize_sauvola;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextLine {
-    /// Smoothed body centre, not a typographically exact baseline.
+    /// Robust baseline-relative text flow, offset into the glyph body.
     pub points: Vec<Point>,
     /// Valid support only, in input image pixels: [left, top, right, bottom].
     pub bounds: [f64; 4],
@@ -228,21 +228,25 @@ pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<
             median(coords.iter().map(|p| p.2).collect()),
         )
     };
+    let lefts: Vec<_> = chains
+        .iter()
+        .map(|ids| ids.iter().map(|id| glyphs[*id].bounds[0]).min().unwrap())
+        .collect();
+    let starts: Vec<_> = chains.iter().map(|ids| endpoint(ids, false)).collect();
+    let ends: Vec<_> = chains.iter().map(|ids| endpoint(ids, true)).collect();
     let mut edges = vec![];
-    for (i, a) in chains.iter().enumerate() {
-        for (j, b) in chains.iter().enumerate() {
+    for i in 0..chains.len() {
+        for j in 0..chains.len() {
             if i == j {
                 continue;
             }
             // Short chains may have slightly overlapping italic envelopes.
             // A strict left-to-right order still makes the chain graph acyclic.
-            let left_a = a.iter().map(|id| glyphs[*id].bounds[0]).min().unwrap();
-            let left_b = b.iter().map(|id| glyphs[*id].bounds[0]).min().unwrap();
-            if (left_b, j) <= (left_a, i) {
+            if (lefts[j], j) <= (lefts[i], i) {
                 continue;
             }
-            let (ax, ay, ah) = endpoint(a, true);
-            let (bx, by, bh) = endpoint(b, false);
+            let (ax, ay, ah) = ends[i];
+            let (bx, by, bh) = starts[j];
             let gap = bx - ax;
             let height = (ah + bh) / 2.;
             if gap < -0.35 * height
@@ -347,41 +351,94 @@ pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<
         if samples.len() < if curvature_supported { 6 } else { 3 } {
             continue;
         }
-        // Local affine smoothing suppresses character-shape jitter without
-        // imposing a straight line on the entire curved text span.
+        // Glyph bottoms share a baseline; centres do not (capitals, x-height,
+        // ascenders). Fit their lower envelope robustly so descenders do not
+        // drag the geometric flow down. Keep the curve inside the text body.
+        let baseline: Vec<_> = members
+            .iter()
+            .filter_map(|g| {
+                let [left, top, right, bottom] = g.bounds;
+                ((bottom - top) as f64 >= 0.45 * local_height).then_some(Point {
+                    x: (left + right) as f64 * 0.5,
+                    y: bottom as f64 - 0.45 * local_height,
+                })
+            })
+            .collect();
         let radius = 6. * local_height;
         let points: Vec<Point> = samples
             .iter()
             .map(|p| {
-                let nearby: Vec<_> = samples
+                let nearby: Vec<_> = baseline
                     .iter()
                     .filter(|q| (q.x - p.x).abs() <= radius)
                     .collect();
-                let mean_x = nearby.iter().map(|q| q.x).sum::<f64>() / nearby.len() as f64;
-                let mean_y = nearby.iter().map(|q| q.y).sum::<f64>() / nearby.len() as f64;
-                let denom = nearby.iter().map(|q| (q.x - mean_x).powi(2)).sum::<f64>();
-                let slope = if denom > 0. {
-                    nearby
+                if nearby.is_empty() {
+                    return Point {
+                        x: p.x / scale,
+                        y: p.y / scale,
+                    };
+                }
+                let mut weights = vec![1.; nearby.len()];
+                let mut intercept = p.y;
+                for _ in 0..8 {
+                    let sum = weights.iter().sum::<f64>();
+                    let mean_x = nearby
                         .iter()
-                        .map(|q| (q.x - mean_x) * (q.y - mean_y))
+                        .zip(&weights)
+                        .map(|(q, w)| q.x * w)
                         .sum::<f64>()
-                        / denom
-                } else {
-                    0.
-                };
+                        / sum;
+                    let mean_y = nearby
+                        .iter()
+                        .zip(&weights)
+                        .map(|(q, w)| q.y * w)
+                        .sum::<f64>()
+                        / sum;
+                    let den = nearby
+                        .iter()
+                        .zip(&weights)
+                        .map(|(q, w)| w * (q.x - mean_x).powi(2))
+                        .sum::<f64>();
+                    let slope = if den > 1. {
+                        nearby
+                            .iter()
+                            .zip(&weights)
+                            .map(|(q, w)| w * (q.x - mean_x) * (q.y - mean_y))
+                            .sum::<f64>()
+                            / den
+                    } else {
+                        0.
+                    };
+                    intercept = mean_y + slope * (p.x - mean_x);
+                    for (q, w) in nearby.iter().zip(&mut weights) {
+                        let residual = q.y - intercept - slope * (q.x - p.x);
+                        *w = (if residual > 0. { 0.3 } else { 0.7 })
+                            / residual.abs().max(0.08 * local_height);
+                    }
+                }
                 Point {
                     x: p.x / scale,
-                    y: (mean_y + slope * (p.x - mean_x)) / scale,
+                    y: intercept / scale,
                 }
             })
             .collect();
-        let rms = (samples
+        // Independent glyph supports, not dense interpolated samples, set the
+        // uncertainty. Typographic height variation is no longer curve noise.
+        let residuals: Vec<_> = baseline
             .iter()
-            .zip(&points)
-            .map(|(p, q)| (p.y - q.y * scale).powi(2))
-            .sum::<f64>()
-            / samples.len() as f64)
-            .sqrt();
+            .map(|p| {
+                let q = points
+                    .iter()
+                    .min_by(|a, b| {
+                        (a.x * scale - p.x)
+                            .abs()
+                            .total_cmp(&(b.x * scale - p.x).abs())
+                    })
+                    .unwrap();
+                (p.y - q.y * scale).abs()
+            })
+            .collect();
+        let rms = median(residuals).max(0.25);
         if rms > 0.35 * local_height {
             continue;
         }
@@ -415,7 +472,7 @@ pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<
             ],
             block_id: 0,
             confidence: (estimated_characters / 20.).min(1.) * (1. - rms / local_height).max(0.),
-            uncertainty_pixels: (rms + 0.5) / scale,
+            uncertainty_pixels: (rms / (baseline.len() as f64).sqrt().clamp(1., 4.) + 0.5) / scale,
         });
     }
     lines.sort_by(|a, b| {
@@ -443,6 +500,32 @@ pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn changing_glyph_heights_do_not_tilt_a_title_baseline() {
+        for slope in [0., 0.035] {
+            let mut image = GrayImage::from_pixel(740, 160, image::Luma([255]));
+            // A large initial capital followed by x-height letters is normal
+            // typography. Their centres are not a geometric text baseline.
+            for i in 0..28 {
+                let x = 35 + i * 23;
+                let height = if i < 4 { 39 } else { 23 };
+                let bottom = (90. + slope * x as f64).round() as u32;
+                for y in bottom - height..bottom {
+                    for xx in x..x + 13 {
+                        image.put_pixel(xx, y, image::Luma([0]));
+                    }
+                }
+            }
+            let lines = detect_text_lines(&image, &[]);
+            let line = lines.iter().max_by_key(|l| l.points.len()).unwrap();
+            let a = line.points.first().unwrap();
+            let b = line.points.last().unwrap();
+            assert!(
+                ((b.y - a.y) - slope * (b.x - a.x)).abs() < 1.5,
+                "typography changed the measured tilt: {a:?} {b:?}"
+            );
+        }
+    }
     use image::Luma;
     fn paragraph(columns: &[u32]) -> GrayImage {
         let mut im = GrayImage::from_pixel(650, 220, Luma([255]));

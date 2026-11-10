@@ -235,20 +235,16 @@ fn interp(points: &[Point], x: f64) -> f64 {
 pub(crate) fn map_observations(
     data: &Observations,
     edges: &[StaffEdge],
-    map: impl Fn(Point) -> Point,
+    map: impl Fn(Point) -> Point + Sync,
 ) -> Result<(Observations, Vec<StaffEdge>, Point)> {
-    let curves: Vec<[Vec<Point>; 5]> = data
-        .staves
-        .iter()
-        .map(|s| {
-            std::array::from_fn(|k| {
-                s.x.iter()
-                    .zip(&s.y[k])
-                    .map(|(x, y)| map(Point { x: *x, y: *y }))
-                    .collect()
-            })
+    let curves: Vec<[Vec<Point>; 5]> = crate::parallel::map(&data.staves, |s| {
+        std::array::from_fn(|k| {
+            s.x.iter()
+                .zip(&s.y[k])
+                .map(|(x, y)| map(Point { x: *x, y: *y }))
+                .collect()
         })
-        .collect();
+    });
     let bars: Vec<Vec<Point>> = data
         .barlines
         .iter()

@@ -51,12 +51,8 @@ fn line_end(
     sy: f64,
     d: f64,
 ) -> Option<(Point, f64)> {
-    let inward = if side == StaffEdgeSide::Start {
-        1.
-    } else {
-        -1.
-    };
-    let reference = if inward > 0. {
+    let inward: i64 = if side == StaffEdgeSide::Start { 1 } else { -1 };
+    let reference = if inward > 0 {
         staff.x[0] * sx
     } else {
         *staff.x.last().unwrap() * sx
@@ -64,48 +60,71 @@ fn line_end(
     let radius = 8. * d;
     let inside = (6. * d).ceil().max(16.) as usize;
     let outside = (1.5 * d).ceil().max(4.) as usize;
+    let entry = (d.ceil() as usize).max(4);
+    // Clefs and key signatures attach broad ink to real staff rules.
+    // Look farther inward for a sustained clean rule instead of requiring
+    // most of the immediate entry window to be narrow.
+    let sustained = (12. * d).ceil() as usize;
+    let candidates = (reference - radius).floor().max(0.) as usize
+        ..=(reference + radius).ceil().min((ink.w - 1) as f64) as usize;
+    // Every candidate reads the rule at whole columns, and neighbouring
+    // candidates read the same ones: sample each column once. `None` is a
+    // column where the rule leaves the permitted ink, else whether it holds
+    // ink there and whether that ink is a narrow ridge.
+    let reach = inside.max(sustained) as i64;
+    let (before, after) = if inward > 0 {
+        (outside as i64, reach - 1)
+    } else {
+        (reach - 1, outside as i64)
+    };
+    let first = *candidates.start() as i64 - before;
+    let samples: Vec<Option<(bool, bool)>> = (first..=*candidates.end() as i64 + after)
+        .map(|column| {
+            let x = column as f64;
+            let y = course(staff, k, x, sx, sy, d);
+            ink.permits(x, y).then(|| ridge(ink, x, y, d))
+        })
+        .collect();
     let mut best: Option<(f64, Point, f64)> = None;
-    for xx in (reference - radius).floor().max(0.) as usize
-        ..=(reference + radius).ceil().min((ink.w - 1) as f64) as usize
-    {
+    'candidates: for xx in candidates {
         let x = xx as f64;
-        let y = course(staff, k, x, sx, sy, d);
         // Endpoints require actual paper on both sides. An image crop is not
         // an ink-to-paper transition and cannot provide a geometric boundary.
         if x - (outside as f64) < 2. || x + (outside as f64) > (ink.w - 3) as f64 {
             continue;
         }
+        let sample = |inwards: i64| samples[(xx as i64 + inward * inwards - first) as usize];
+        // Select the actual transition pixel, not a location one or two pixels
+        // inside an antialiased stroke that also passes the aggregate checks.
+        if !matches!((sample(0), sample(-1)), (Some((true, _)), Some((false, _)))) {
+            continue;
+        }
         let mut present = 0;
         let mut entry_present = 0;
-        let entry = (d.ceil() as usize).max(4);
-        let mut longest_clean = 0_usize;
-        let mut clean_run = 0_usize;
-        let mut clean_gap = 0_usize;
-        let mut clear = 0;
-        let mut permitted = true;
         for j in 0..inside {
-            let at = x + inward * j as f64;
-            let yy = course(staff, k, at, sx, sy, d);
-            if !ink.permits(at, yy) {
-                permitted = false;
-                break;
-            }
-            let (has, _) = ridge(ink, at, yy, d);
+            let Some((has, _)) = sample(j as i64) else {
+                continue 'candidates;
+            };
             present += usize::from(has);
             if j < entry {
                 entry_present += usize::from(has);
             }
         }
-        // Clefs and key signatures attach broad ink to real staff rules.
-        // Look farther inward for a sustained clean rule instead of requiring
-        // most of the immediate entry window to be narrow.
-        for j in 0..(12. * d).ceil() as usize {
-            let at = x + inward * j as f64;
-            let yy = course(staff, k, at, sx, sy, d);
-            if !ink.permits(at, yy) {
+        let mut clear = 0;
+        for j in 1..=outside {
+            let Some((has, _)) = sample(-(j as i64)) else {
+                continue 'candidates;
+            };
+            clear += usize::from(!has);
+        }
+        let mut longest_clean = 0_usize;
+        let mut clean_run = 0_usize;
+        let mut clean_gap = 0_usize;
+        for j in 0..sustained {
+            let Some((_, narrow)) = sample(j as i64) else {
                 break;
-            }
-            if ridge(ink, at, yy, d).1 {
+            };
+            if narrow {
                 clean_run += if clean_run > 0 { clean_gap + 1 } else { 1 };
                 clean_gap = 0;
                 longest_clean = longest_clean.max(clean_run);
@@ -116,18 +135,6 @@ fn line_end(
                     clean_gap = 0;
                 }
             }
-        }
-        for j in 1..=outside {
-            let at = x - inward * j as f64;
-            let yy = course(staff, k, at, sx, sy, d);
-            if !ink.permits(at, yy) {
-                permitted = false;
-                break;
-            }
-            clear += usize::from(!ridge(ink, at, yy, d).0);
-        }
-        if !permitted || !ridge(ink, x, y, d).0 {
-            continue;
         }
         let coverage = present as f64 / inside as f64;
         let clean = (longest_clean as f64 / (3. * d)).min(1.);
@@ -141,11 +148,6 @@ fn line_end(
         {
             continue;
         }
-        // Select the actual transition pixel, not a location one or two pixels
-        // inside an antialiased stroke that also passes the aggregate checks.
-        if ridge(ink, x - inward, course(staff, k, x - inward, sx, sy, d), d).0 {
-            continue;
-        }
         let confidence = 0.4 * coverage + 0.3 * clean + 0.3 * blank;
         let score = confidence - 0.03 * (x - reference).abs() / radius;
         if best.as_ref().is_none_or(|b| score > b.0) {
@@ -153,7 +155,7 @@ fn line_end(
                 score,
                 Point {
                     x: x / sx,
-                    y: y / sy,
+                    y: course(staff, k, x, sx, sy, d) / sy,
                 },
                 confidence,
             ));

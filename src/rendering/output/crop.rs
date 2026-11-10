@@ -1,5 +1,27 @@
 //! Final content and physical-page crop bounds.
 use image::GrayImage;
+#[cfg(feature = "application")]
+use image::{ImageBuffer, Pixel};
+
+/// `imageops::crop_imm(image, x, y, width, height).to_image()`, copied a row
+/// rather than a pixel at a time.
+#[cfg(feature = "application")]
+pub(crate) fn cropped<P: Pixel<Subpixel = u8>>(
+    image: &ImageBuffer<P, Vec<u8>>,
+    [x, y, width, height]: [u32; 4],
+) -> ImageBuffer<P, Vec<u8>> {
+    let (x, y) = (x.min(image.width()), y.min(image.height()));
+    let (width, height) = (width.min(image.width() - x), height.min(image.height() - y));
+    let channels = usize::from(P::CHANNEL_COUNT);
+    let stride = image.width() as usize * channels;
+    let (first, len) = (x as usize * channels, width as usize * channels);
+    let mut pixels = Vec::with_capacity(len * height as usize);
+    let rows = image.as_raw().chunks_exact(stride.max(1));
+    for row in rows.skip(y as usize).take(height as usize) {
+        pixels.extend_from_slice(&row[first..][..len]);
+    }
+    ImageBuffer::from_raw(width, height, pixels).unwrap()
+}
 
 /// Inclusive ink bounds plus padding, expressed as x/y/width/height.
 /// Ignore isolated components smaller than six pixels when choosing the crop;

@@ -1,6 +1,9 @@
 //! Image observations: classical music/text detection and optional ONNX pages.
 pub(crate) mod music;
 pub mod pages;
+pub mod quality;
+mod resample;
+pub mod stems;
 mod text;
 
 pub use music::{

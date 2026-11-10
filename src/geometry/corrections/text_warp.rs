@@ -24,6 +24,7 @@ fn smooth(t: f64) -> f64 {
     t * t * (3. - 2. * t)
 }
 fn value(points: &[Point], x: f64) -> f64 {
+    let x = x.clamp(points[0].x, points.last().unwrap().x);
     let i = points
         .partition_point(|p| p.x < x)
         .clamp(1, points.len() - 1);
@@ -34,6 +35,7 @@ struct Constraint {
     residual: Vec<Point>,
     bounds: [f64; 4],
     pad: f64,
+    x_pad: f64,
     weight: f64,
     block_id: usize,
 }
@@ -72,6 +74,7 @@ impl TextWarp {
             // uncertainty have little influence, without a minimum word length.
             let weight = line.confidence.clamp(0., 1.) / (line.confidence + 0.1) * variance
                 / (variance + noise * noise);
+            let amplitude = p.iter().map(|p| (p.y - mean_y).abs()).fold(0_f64, f64::max);
             constraints.push(Constraint {
                 residual: p
                     .iter()
@@ -81,7 +84,10 @@ impl TextWarp {
                     })
                     .collect(),
                 bounds: [p[0].x, line.bounds[1], p.last().unwrap().x, line.bounds[3]],
-                pad: (height * 0.75).max(12.),
+                // Leave enough transition space for the existing Jacobian
+                // bounds; an abrupt fade of one word must not shrink all text.
+                pad: (height * 0.75).max(12.).max(amplitude * 8.),
+                x_pad: (height * 0.75).max(12.).max(amplitude * 16.),
                 weight,
                 block_id: line.block_id,
             });
@@ -125,16 +131,20 @@ impl TextWarp {
                 }) {
                     continue;
                 }
-                let (mut sum, mut weight) = (0., 0.25); // identity prior
+                let (mut sum, mut weight) = (0., 0.05); // uncertainty already weights each line
                 for constraint in &constraints {
                     let b = constraint.bounds;
-                    if p.x < b[0] || p.x > b[2] {
+                    let pad = constraint.pad;
+                    let x_pad = constraint.x_pad;
+                    if p.x < b[0] - x_pad || p.x > b[2] + x_pad {
                         continue;
                     }
-                    let pad = constraint.pad;
                     let wy = smooth((p.y - b[1] + pad) / pad) * smooth((b[3] + pad - p.y) / pad);
-                    let x_pad = pad.min((b[2] - b[0]) * 0.2);
-                    let wx = smooth((p.x - b[0]) / x_pad) * smooth((b[2] - p.x) / x_pad);
+                    // Keep the complete measured word, including both ends,
+                    // in the correction. Fade only in adjacent whitespace;
+                    // outside support the endpoint displacement stays constant.
+                    let wx =
+                        smooth((p.x - b[0] + x_pad) / x_pad) * smooth((b[2] + x_pad - p.x) / x_pad);
                     let local_weight = constraint.weight * wx * wy;
                     sum += local_weight * value(&constraint.residual, p.x);
                     weight += local_weight;
@@ -142,8 +152,44 @@ impl TextWarp {
                 values[y * w + x] = sum / weight;
             }
         }
-        // A global derivative bound includes transitions into music guards. It
-        // prevents folds without relying on the text detector's confidence score.
+        // Enforce bounds locally. One awkward short word or a transition into a
+        // music guard must not scale down a distant, well-observed title.
+        let cap = 0.02 * (bounds[2] - bounds[0]).min(bounds[3] - bounds[1]);
+        let envelope = |negative: bool| {
+            let mut v: Vec<_> = values
+                .iter()
+                .map(|x| (if negative { -*x } else { *x }).clamp(0., cap))
+                .collect();
+            // Separable min-plus distance transform: greatest minorant with
+            // these horizontal/vertical Lipschitz bounds. Zero guards remain
+            // exactly zero and no correction spreads outside observed support.
+            for y in 0..h {
+                for x in 1..w {
+                    let i = y * w + x;
+                    v[i] = v[i].min(v[i - 1] + 0.15 * dx);
+                }
+                for x in (0..w - 1).rev() {
+                    let i = y * w + x;
+                    v[i] = v[i].min(v[i + 1] + 0.15 * dx);
+                }
+            }
+            for x in 0..w {
+                for y in 1..h {
+                    let i = y * w + x;
+                    v[i] = v[i].min(v[i - w] + 0.25 * dy);
+                }
+                for y in (0..h - 1).rev() {
+                    let i = y * w + x;
+                    v[i] = v[i].min(v[i + w] + 0.25 * dy);
+                }
+            }
+            v
+        };
+        let positive = envelope(false);
+        let negative = envelope(true);
+        values = positive.iter().zip(negative).map(|(p, n)| p - n).collect();
+        // The difference of the two fields has |du/dy| <= 0.5, hence a positive
+        // Jacobian >= 0.5 even between grid probes, including music transitions.
         let mut derivative = 0_f64;
         for y in 0..h - 1 {
             for x in 0..w {
@@ -151,22 +197,10 @@ impl TextWarp {
                     derivative.max((values[(y + 1) * w + x] - values[y * w + x]).abs() / dy);
             }
         }
-        let mut horizontal = 0_f64;
-        for y in 0..h {
-            for x in 0..w - 1 {
-                horizontal = horizontal.max((values[y * w + x + 1] - values[y * w + x]).abs() / dx);
-            }
-        }
-        let amplitude = values.iter().map(|v| v.abs()).fold(0_f64, f64::max);
-        let scale = (0.25 / derivative.max(1e-12))
-            .min(0.15 / horizontal.max(1e-12))
-            .min(0.02 * (bounds[2] - bounds[0]).min(bounds[3] - bounds[1]) / amplitude.max(1e-12))
-            .min(1.);
-        for v in &mut values {
-            *v *= scale;
+        for v in &values {
             report.max_displacement_pixels = report.max_displacement_pixels.max(v.abs());
         }
-        report.min_vertical_derivative = 1. - derivative * scale;
+        report.min_vertical_derivative = 1. - derivative;
         if report.max_displacement_pixels < 0.15 {
             report.accepted_blocks = 0;
             report.max_displacement_pixels = 0.;
@@ -274,6 +308,70 @@ impl TextWarp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unrelated_short_words_do_not_suppress_the_title_correction() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            lines: Vec<TextLine>,
+            protected: Vec<[f64; 4]>,
+            bounds: [f64; 4],
+        }
+        let case: Case = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/text/title-and-small-words.json"
+        )))
+        .unwrap();
+        let (warp, report) = TextWarp::fit(&case.lines, &case.protected, case.bounds);
+        let warp = warp.unwrap();
+        for line in &case.lines[..2] {
+            let range = |points: &[Point]| {
+                points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max)
+                    - points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min)
+            };
+            let corrected: Vec<_> = line.points.iter().map(|p| warp.forward(*p)).collect();
+            assert!(
+                range(&corrected) < range(&line.points) * 0.25,
+                "title was suppressed by unrelated local constraints"
+            );
+        }
+        assert!(report.min_vertical_derivative >= 0.5 - 1e-9);
+        for guard in &case.protected {
+            let point = Point {
+                x: (guard[0] + guard[2]) * 0.5,
+                y: (guard[1] + guard[3]) * 0.5,
+            };
+            let p = warp.forward(point);
+            assert_eq!((p.x, p.y), (point.x, point.y));
+        }
+    }
+    #[test]
+    fn a_slanted_title_is_corrected_at_both_measured_endpoints() {
+        let line = TextLine {
+            points: (0..21)
+                .map(|i| Point {
+                    x: 200. + i as f64 * 15.,
+                    y: 110. + i as f64 * 1.2,
+                })
+                .collect(),
+            bounds: [200., 90., 510., 155.],
+            block_id: 0,
+            confidence: 0.8,
+            uncertainty_pixels: 0.5,
+        };
+        let guard = [[0., 300., 1000., 550.]];
+        let (warp, _) = TextWarp::fit(std::slice::from_ref(&line), &guard, [0., 0., 1000., 700.]);
+        let warp = warp.unwrap();
+        let a = line.points[0];
+        let b = *line.points.last().unwrap();
+        assert!(
+            (warp.forward(b).y - warp.forward(a).y).abs() < (b.y - a.y) * 0.3,
+            "title endpoints retained their original slant"
+        );
+        for x in [100., 400., 700.] {
+            let p = Point { x, y: 350. };
+            assert_eq!(warp.forward(p).y, p.y);
+        }
+    }
     fn lines() -> Vec<TextLine> {
         (0..4)
             .map(|k| TextLine {

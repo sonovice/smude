@@ -1,5 +1,5 @@
-//! Four-corner rectification for detector input only. Measurements return to
-//! the untouched source crop before fitting/rendering the final image.
+//! Reversible page coordinates from a measured frame or predicted interior grid.
+//! Analysis is bounded; final rendering composes the map into the source sampler.
 use crate::geometry::{Barline, Observations, Point, Staff};
 use image::{Rgb, RgbImage};
 use rayon::prelude::*;
@@ -17,6 +17,8 @@ pub struct PageAnalysisMap {
     height: u32,
     to_unit: Matrix,
     from_unit: Matrix,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grid: Option<super::page_grid::PageGrid>,
 }
 
 fn project(h: Matrix, p: Point) -> Option<Point> {
@@ -168,7 +170,55 @@ impl PageAnalysisMap {
             height,
             to_unit,
             from_unit,
+            grid: None,
         })
+    }
+
+    pub fn from_grid(
+        source_width: u32,
+        source_height: u32,
+        points: Vec<Point>,
+        ratio: f64,
+    ) -> Result<Self> {
+        if source_width < 2
+            || source_height < 2
+            || !ratio.is_finite()
+            || !(0.1..=10.).contains(&ratio)
+        {
+            return Err(Error::Invalid("invalid learned page dimensions or ratio"));
+        }
+        let grid = super::page_grid::PageGrid::new(points)?;
+        let width = grid.mean_width().round().max(2.) as u32;
+        let height = (f64::from(width) * ratio).round().max(2.) as u32;
+        if width > 12000 || height > 12000 {
+            return Err(Error::Invalid("learned page dimensions exceed limit"));
+        }
+        let identity = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
+        Ok(Self {
+            source_width,
+            source_height,
+            width,
+            height,
+            to_unit: identity,
+            from_unit: identity,
+            grid: Some(grid),
+        })
+    }
+
+    pub(crate) fn source_dimensions(&self) -> (u32, u32) {
+        (self.source_width, self.source_height)
+    }
+
+    pub(crate) fn bounded(&self, max_width: u32) -> Self {
+        let mut out = self.clone();
+        if out.width > max_width.max(2) {
+            out.height = (f64::from(out.height) * f64::from(max_width.max(2))
+                / f64::from(out.width))
+            .round()
+            .max(2.) as u32;
+            out.width = max_width.max(2);
+        }
+        out
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
@@ -176,6 +226,12 @@ impl PageAnalysisMap {
     }
 
     pub fn forward(&self, p: Point) -> Option<Point> {
+        if let Some(grid) = &self.grid {
+            return grid.forward(p).map(|p| Point {
+                x: p.x * f64::from(self.width - 1),
+                y: p.y * f64::from(self.height - 1),
+            });
+        }
         project(
             self.to_unit,
             Point {
@@ -191,6 +247,11 @@ impl PageAnalysisMap {
 
     /// Exact determinant of the projective pixel-to-pixel map.
     pub fn jacobian_det(&self, p: Point) -> f64 {
+        if let Some(grid) = &self.grid {
+            return grid.forward(p).map_or(f64::NAN, |q| {
+                f64::from(self.width - 1) * f64::from(self.height - 1) / grid.inverse_jacobian(q)
+            });
+        }
         let h = self.to_unit;
         let det = h[0][0] * (h[1][1] * h[2][2] - h[1][2] * h[2][1])
             - h[0][1] * (h[1][0] * h[2][2] - h[1][2] * h[2][0])
@@ -203,6 +264,15 @@ impl PageAnalysisMap {
     }
 
     pub fn inverse(&self, p: Point) -> Option<Point> {
+        if !p.x.is_finite() || !p.y.is_finite() {
+            return None;
+        }
+        if let Some(grid) = &self.grid {
+            return Some(grid.inverse(Point {
+                x: p.x / f64::from(self.width - 1),
+                y: p.y / f64::from(self.height - 1),
+            }));
+        }
         project(
             self.from_unit,
             Point {

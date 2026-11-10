@@ -1,6 +1,29 @@
-//! Detection progress in untouched, full-resolution input-image coordinates.
+//! Lightweight processing boundaries and optional source-coordinate overlays.
 use crate::geometry::{Point, Staff};
 use std::sync::Arc;
+
+/// Lightweight processing boundaries, independent of detection overlays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum ProcessingStage {
+    Preparing,
+    PageDetection,
+    Analysis,
+    Dewarping,
+    Rendering,
+    Enhancement,
+    Saving,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessingEvent {
+    InputPixels(u64),
+    Stage(ProcessingStage),
+    PageStarted { index: usize, count: usize },
+    PageFinished { index: usize },
+    Finished,
+}
+/// Synchronous, bounded-size events. Observers must not block the worker.
+pub type ProcessingObserver = Arc<dyn Fn(ProcessingEvent) + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DetectionStage {
@@ -23,6 +46,11 @@ pub struct DetectionProgress {
 pub type ProgressObserver = Arc<dyn Fn(DetectionProgress) + Send + Sync>;
 
 impl super::Options {
+    pub(super) fn processing(&self, event: ProcessingEvent) {
+        if let Some(observer) = &self.processing_progress {
+            observer(event);
+        }
+    }
     pub(super) fn emit(
         &self,
         page_id: &str,

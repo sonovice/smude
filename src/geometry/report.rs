@@ -24,6 +24,11 @@ pub struct Validation {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Report {
+    #[cfg(feature = "render")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_model: Option<crate::geometry::PageAnalysisMap>,
+    #[cfg(feature = "render")]
+    pub direction_mesh: Option<crate::geometry::MeshPipelineReport>,
     pub schema: &'static str,
     pub input_width: u32,
     pub input_height: u32,
@@ -68,6 +73,7 @@ pub struct FitProfile {
     pub staff_warp_seconds: f64,
     pub system_shear_seconds: f64,
     pub gcs_seconds: f64,
+    pub direction_mesh_seconds: f64,
     pub vertical_correction_seconds: f64,
     pub staff_conditioning_seconds: f64,
     pub map_validation_seconds: f64,

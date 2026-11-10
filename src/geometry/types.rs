@@ -31,3 +31,11 @@ impl Default for Config {
         }
     }
 }
+
+/// Additional measured vertical ink, kept separate from semantic barlines.
+/// Weight is relative confidence in [0,1], not a classification probability.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerticalPath {
+    pub points: Vec<Point>,
+    pub weight: f64,
+}

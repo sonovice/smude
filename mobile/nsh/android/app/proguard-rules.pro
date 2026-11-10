@@ -1,0 +1,1 @@
+-keep class com.gridnotelabs.smude.design.CameraInference { *; }

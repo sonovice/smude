@@ -5,9 +5,12 @@ struct Params { sizes:vec4u, grid:vec4u }
 @group(0) @binding(2) var<storage,read> roots:array<u32>;
 @group(0) @binding(3) var<storage,read> dense:array<vec2f>;
 @group(0) @binding(4) var<storage,read_write> image:array<u32>;
-@group(0) @binding(5) var<storage,read_write> moments:array<vec2u>;
-@group(0) @binding(6) var<storage,read_write> tones:array<u32>;
-@group(0) @binding(7) var<uniform> params:Params;
+// One word per pixel and plane: a `vec2u` plane would double the largest
+// binding and push full-resolution phone pages past the binding limit.
+@group(0) @binding(5) var<storage,read_write> sums:array<u32>;
+@group(0) @binding(6) var<storage,read_write> squares:array<u32>;
+@group(0) @binding(7) var<storage,read_write> tones:array<u32>;
+@group(0) @binding(8) var<uniform> params:Params;
 
 fn inverse(pixel:vec2u)->vec2f {
     var origin=(pixel/32u)*32u;
@@ -59,13 +62,15 @@ fn render(@builtin(global_invocation_id) id:vec3u) {
 @compute @workgroup_size(8,8)
 fn horizontal(@builtin(global_invocation_id) id:vec3u) {
     if(any(id.xy>=params.sizes.zw)) {return;}
-    var sum=0u;var squares=0u;
+    var sum=vec2u(0u);
     for(var x=-25;x<=25;x++) {
         let xx=u32(clamp(i32(id.x)+x,0,i32(params.sizes.z)-1));
         let v=image[id.y*params.sizes.z+xx]>>24u;
-        sum+=v;squares+=v*v;
+        sum+=vec2u(v,v*v);
     }
-    moments[id.y*params.sizes.z+id.x]=vec2u(sum,squares);
+    let index=id.y*params.sizes.z+id.x;
+    sums[index]=sum.x;
+    squares[index]=sum.y;
 }
 @compute @workgroup_size(8,8)
 fn paper(@builtin(global_invocation_id) id:vec3u) {
@@ -73,7 +78,8 @@ fn paper(@builtin(global_invocation_id) id:vec3u) {
     var sum=vec2u(0u);
     for(var y=-25;y<=25;y++) {
         let yy=u32(clamp(i32(id.y)+y,0,i32(params.sizes.w)-1));
-        sum+=moments[yy*params.sizes.z+id.x];
+        let row=yy*params.sizes.z+id.x;
+        sum+=vec2u(sums[row],squares[row]);
     }
     let mean=f32(sum.x)/2601.;
     let stddev=sqrt(max(f32(sum.y)/2601.-mean*mean,0.));
@@ -82,9 +88,7 @@ fn paper(@builtin(global_invocation_id) id:vec3u) {
     let gray=image[index]>>24u;
     let value=f32(gray);
     let binary=select(255u,0u,value<=threshold);
-    let half=max(min(max(mean*0.1,stddev*0.5),mean*0.18),2.);
-    let black=threshold-half;
-    let white=min(threshold+half,mean*0.98);
-    let clean=select(u32(floor(255.*clamp((value-black)/max(white-black,1.),0.,1.)+0.5)),0u,gray==0u);
-    tones[index]=gray|(binary<<8u)|(clean<<16u)|0xff000000u;
+    // Continuous paper correction is shared CPU code after readback. The binary
+    // plane is for diagnostics/content crop and must not gate gray coverage.
+    tones[index]=gray|(binary<<8u)|0xffff0000u;
 }

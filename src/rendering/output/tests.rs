@@ -6,30 +6,138 @@ use super::*;
 #[cfg(test)]
 mod distance_and_cache {
     #[test]
-    fn parallel_distance_strips_match_exact_chebyshev_distance_across_halos() {
-        let (w, h) = (17_usize, 600_usize);
-        let points = [(7_usize, 255_usize), (3, 267), (12, 516), (1, 0), (15, 599)];
-        for cap in [1_u16, 11, 65, 125] {
-            let mut seeds = vec![cap; w * h];
-            for (x, y) in points {
-                seeds[y * w + x] = 0;
-            }
-            let actual = capped_distance(&seeds, w, h, cap, usize::from(cap));
-            for y in 0..h {
-                for x in 0..w {
-                    let expected = points
-                        .iter()
-                        .map(|(a, b)| x.abs_diff(*a).max(y.abs_diff(*b)))
-                        .min()
-                        .unwrap()
-                        .min(usize::from(cap)) as u16;
-                    assert_eq!(actual[y * w + x], expected, "cap={cap}, ({x},{y})");
+    fn sparse_distance_sweeps_match_exact_chebyshev_distance() {
+        // Seed rectangles as [x0, y0, x1, y1], inclusive: single pixels, solid
+        // areas covering whole tiles, and rasters with large untouched parts.
+        let cases: [(usize, usize, &[[usize; 4]]); 4] = [
+            (
+                17,
+                600,
+                &[
+                    [7, 255, 7, 255],
+                    [3, 267, 3, 267],
+                    [1, 0, 1, 0],
+                    [15, 599, 15, 599],
+                ],
+            ),
+            (
+                300,
+                200,
+                &[[60, 0, 200, 130], [299, 199, 299, 199], [0, 150, 0, 150]],
+            ),
+            (523, 140, &[[400, 70, 400, 70]]),
+            (130, 70, &[]),
+        ];
+        for (w, h, seeds) in cases {
+            for cap in [1_u8, 11, 65, 125, 200] {
+                let mut narrow = vec![cap; w * h];
+                for seed in seeds {
+                    for y in seed[1]..=seed[3] {
+                        narrow[y * w + seed[0]..=y * w + seed[2]].fill(0);
+                    }
+                }
+                let mut wide: Vec<u16> = narrow.iter().map(|v| u16::from(*v)).collect();
+                // Any number of bands yields the field of a single sweep.
+                for bands in [2, 3, 16] {
+                    let mut banded = narrow.clone();
+                    capped_distance_in_bands(&mut banded, w, h, cap, bands);
+                    let mut whole = narrow.clone();
+                    capped_distance_in_bands(&mut whole, w, h, cap, 1);
+                    assert_eq!(banded, whole, "cap={cap}, bands={bands}");
+                }
+                capped_distance(&mut narrow, w, h, cap);
+                capped_distance(&mut wide, w, h, u16::from(cap));
+                for y in 0..h {
+                    for x in 0..w {
+                        let outside = |v: usize, low: usize, high: usize| {
+                            low.saturating_sub(v).max(v.saturating_sub(high))
+                        };
+                        let expected = seeds
+                            .iter()
+                            .map(|s| outside(x, s[0], s[2]).max(outside(y, s[1], s[3])))
+                            .min()
+                            .map_or(cap, |d| d.min(usize::from(cap)) as u8);
+                        assert_eq!(narrow[y * w + x], expected, "cap={cap}, ({x},{y})");
+                        assert_eq!(wide[y * w + x], u16::from(expected), "cap={cap}, ({x},{y})");
+                    }
                 }
             }
         }
     }
     #[test]
-    fn shared_border_geometry_preserves_uncached_cleanup_pixels() {
+    fn mask_erosion_matches_the_square_window_inside_the_raster() {
+        for (w, h) in [(1_usize, 1_usize), (9, 7), (40, 33), (64, 5)] {
+            for radius in [1_usize, 2, 5, 40] {
+                let source: Vec<u8> = (0..w * h)
+                    .map(|i| u8::from(i * 7919 % 23 != 0 && i % w != 3 * (i / w)))
+                    .collect();
+                let mut actual = source.clone();
+                erode_mask(&mut actual, w, h, radius);
+                for y in 0..h {
+                    for x in 0..w {
+                        let inside = x >= radius && y >= radius && x + radius < w && y + radius < h;
+                        let expected = inside
+                            && (y - radius..=y + radius).all(|yy| {
+                                (x - radius..=x + radius).all(|xx| source[yy * w + xx] != 0)
+                            });
+                        assert_eq!(
+                            actual[y * w + x] != 0,
+                            expected,
+                            "{w}x{h} r{radius} ({x},{y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn page_mask_matches_even_odd_row_crossings() {
+        let point = |x: f64, y: f64| crate::geometry::Point { x, y };
+        let contours = [
+            vec![
+                point(2.3, 1.7),
+                point(40.6, 3.2),
+                point(37.1, 28.9),
+                point(4.4, 30.5),
+            ],
+            // Concave, with vertices on pixel rows and a horizontal edge.
+            vec![
+                point(5., 4.),
+                point(30., 4.),
+                point(18., 15.),
+                point(31., 26.),
+                point(6., 20.),
+            ],
+            // Partly outside the raster on every side.
+            vec![
+                point(-8.5, -3.),
+                point(52., 10.),
+                point(20.2, 44.),
+                point(-2., 25.),
+            ],
+        ];
+        let (w, h) = (44_usize, 34_usize);
+        for contour in contours {
+            let mask = page_mask(&contour, w, h);
+            for y in 0..h {
+                let yy = y as f64;
+                let mut cuts: Vec<f64> = (contour.iter())
+                    .zip(contour.iter().cycle().skip(1))
+                    .filter(|(a, b)| (a.y > yy) != (b.y > yy))
+                    .map(|(a, b)| a.x + (yy - a.y) * (b.x - a.x) / (b.y - a.y))
+                    .collect();
+                cuts.sort_by(f64::total_cmp);
+                for x in 0..w {
+                    let expected = cuts
+                        .chunks_exact(2)
+                        .any(|pair| pair[0] <= x as f64 && x as f64 <= pair[1]);
+                    assert_eq!(mask[y * w + x] != 0, expected, "({x},{y})");
+                }
+            }
+        }
+    }
+    #[test]
+    fn shared_border_geometry_preserves_binary_cleanup_pixels() {
         for (w, h) in [(64, 83), (257, 331)] {
             let gray = GrayImage::from_fn(w, h, |x, y| {
                 let rim = x < 7 || x + 9 > w || y < 5 || y + 8 > h;
@@ -57,20 +165,13 @@ mod distance_and_cache {
                     y: f64::from(h) - 5.,
                 },
             ];
-            let protected = [[5., 20., f64::from(w) - 10., 35.]];
             let raw = binarize_sauvola(&gray);
             let mut expected_binary = raw.clone();
             let expected_count = whiten_page_border(&mut expected_binary, &contour, 2);
-            let mut expected = gray.clone();
-            apply_binary_cleanup_with_contour(&mut expected, &raw, &expected_binary, &contour);
-            whiten_gray_border(&mut expected, &contour, 2, &protected);
             let border = PageBorder::new(&contour);
             let mut actual_binary = raw.clone();
             assert_eq!(border.whiten_binary(&mut actual_binary, 2), expected_count);
-            let mut actual = gray;
-            border.clean_gray(&mut actual, &raw, &actual_binary, 2, &protected);
             assert_eq!(actual_binary, expected_binary);
-            assert_eq!(actual, expected);
         }
     }
     #[test]
@@ -389,6 +490,33 @@ mod crop_tests {
         }
         assert_eq!(content_crop(&image, 2), [0, 0, 8, 3]);
     }
+    #[cfg(feature = "application")]
+    #[test]
+    fn row_copies_equal_the_image_crate_crop_including_clamped_bounds() {
+        let gray = GrayImage::from_fn(13, 9, |x, y| Luma([(x * 19 + y * 7) as u8]));
+        let color = image::RgbImage::from_fn(13, 9, |x, y| {
+            image::Rgb([(x * 19) as u8, (y * 27) as u8, (x + y) as u8])
+        });
+        for bounds in [
+            [0, 0, 13, 9],
+            [3, 2, 5, 4],
+            [12, 8, 1, 1],
+            [4, 0, 0, 9],
+            [10, 7, 20, 20],
+            [13, 9, 3, 3],
+            [40, 40, 2, 2],
+        ] {
+            let [x, y, w, h] = bounds;
+            assert_eq!(
+                cropped(&gray, bounds),
+                image::imageops::crop_imm(&gray, x, y, w, h).to_image()
+            );
+            assert_eq!(
+                cropped(&color, bounds),
+                image::imageops::crop_imm(&color, x, y, w, h).to_image()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -423,6 +551,95 @@ mod print_tests {
     use super::*;
     use image::Luma;
     #[test]
+    fn faint_staff_stem_dot_and_coverage_survive_paper_normalization() {
+        let mut input = GrayImage::from_pixel(240, 180, Luma([240]));
+        for x in 20..220 {
+            input.put_pixel(x, 70, Luma([220]));
+            input.put_pixel(x, 71, Luma([239]));
+        }
+        for y in 45..95 {
+            input.put_pixel(90, y, Luma([225]));
+        }
+        input.put_pixel(120, 55, Luma([230]));
+        let output = normalize_paper(&input);
+        for (x, y) in [(50, 70), (50, 71), (90, 50), (120, 55)] {
+            let expected = (255. * f64::from(input.get_pixel(x, y)[0]) / 240.).round() as u8;
+            assert!(
+                output.get_pixel(x, y)[0].abs_diff(expected) <= 1,
+                "lost coverage at ({x},{y}): expected {expected}, got {}",
+                output.get_pixel(x, y)[0]
+            );
+            assert!(output.get_pixel(x, y)[0] < 255);
+        }
+        assert_eq!(output.get_pixel(40, 40)[0], 255);
+    }
+
+    #[test]
+    fn gray_border_does_not_erase_a_real_near_edge_staff_or_dot() {
+        let contour = [
+            crate::geometry::Point { x: 10., y: 10. },
+            crate::geometry::Point { x: 289., y: 10. },
+            crate::geometry::Point { x: 289., y: 389. },
+            crate::geometry::Point { x: 10., y: 389. },
+        ];
+        let mut gray = GrayImage::from_pixel(300, 400, Luma([255]));
+        for x in 30..270 {
+            gray.put_pixel(x, 12, Luma([80]));
+        }
+        gray.put_pixel(20, 13, Luma([180]));
+        let before = gray.clone();
+        let raw = binarize_sauvola(&gray);
+        let mut binary = raw.clone();
+        let border = PageBorder::new(&contour);
+        border.whiten_binary(&mut binary, 2);
+        border.clean_gray(&mut gray, 2, &[[15., 10., 275., 18.]]);
+        assert!(
+            gray == before,
+            "binary rim classification must not erase gray notation"
+        );
+    }
+
+    #[test]
+    fn final_gray_border_removes_inner_rim_without_losing_faint_print() {
+        let contour = [
+            crate::geometry::Point { x: 10., y: 10. },
+            crate::geometry::Point { x: 290., y: 10. },
+            crate::geometry::Point { x: 290., y: 390. },
+            crate::geometry::Point { x: 10., y: 390. },
+        ];
+        let mut gray = GrayImage::from_pixel(300, 400, Luma([255]));
+        for y in 40..350 {
+            gray.put_pixel(15, y, Luma([190]));
+        }
+        for x in 15..285 {
+            gray.put_pixel(x, 380, Luma([190]));
+        }
+        for x in 30..270 {
+            gray.put_pixel(x, 100, Luma([235]));
+        }
+        gray.put_pixel(80, 105, Luma([244]));
+        for y in 18..28 {
+            for x in 24..30 {
+                gray.put_pixel(x, y, Luma([180]));
+            }
+        }
+        let before = gray.clone();
+        PageBorder::new(&contour).clean_gray(&mut gray, 1, &[[25., 90., 275., 115.]]);
+        assert_eq!(gray.get_pixel(15, 200)[0], 255, "inner page rim remains");
+        assert_eq!(gray.get_pixel(150, 380)[0], 255, "bottom rim remains");
+        for y in 90..115 {
+            for x in 25..275 {
+                assert_eq!(gray.get_pixel(x, y), before.get_pixel(x, y));
+            }
+        }
+        for y in 18..28 {
+            for x in 24..30 {
+                assert_eq!(gray.get_pixel(x, y), before.get_pixel(x, y));
+            }
+        }
+    }
+
+    #[test]
     fn varying_paper_is_white_and_thin_ink_stays_high_contrast() {
         let input = GrayImage::from_fn(160, 90, |x, y| {
             Luma([if y == 45 && (20..140).contains(&x) {
@@ -434,11 +651,55 @@ mod print_tests {
         let normalized = normalize_paper(&input);
         assert_eq!(normalized.get_pixel(30, 10)[0], 255);
         assert_eq!(normalized.get_pixel(130, 10)[0], 255);
-        let print = antialias_print(&normalized);
-        assert_eq!(print.dimensions(), input.dimensions());
-        assert_eq!(print.get_pixel(80, 10)[0], 255);
-        assert!(print.get_pixel(80, 45)[0] < 80);
-        assert!((1..255).contains(&print.get_pixel(80, 44)[0]));
+        assert_eq!(normalized.dimensions(), input.dimensions());
+        assert_eq!(normalized.get_pixel(80, 10)[0], 255);
+        assert!(normalized.get_pixel(80, 45)[0] < 80);
+        assert_eq!(normalized.get_pixel(80, 44)[0], 255);
+    }
+
+    #[test]
+    fn large_shaded_page_keeps_weak_lines_across_analysis_blocks() {
+        let input = GrayImage::from_fn(2051, 301, |x, y| {
+            let paper = 100 + x * 140 / 2050;
+            let ink = [30, 80, 130, 180, 230].contains(&y) || (x == 1024 && (60..150).contains(&y));
+            Luma([(paper - if ink { 10 } else { 0 }) as u8])
+        });
+        let output = normalize_paper(&input);
+        for x in 12..2040 {
+            assert!(
+                output.get_pixel(x, 15)[0] >= 252,
+                "uncorrected paper at {x}"
+            );
+            for y in [30, 80, 130, 180, 230] {
+                let paper = 100 + x * 140 / 2050;
+                let expected = (255. * (paper - 10) as f32 / paper as f32).round() as u8;
+                assert!(
+                    output.get_pixel(x, y)[0].abs_diff(expected) <= 2,
+                    "line coverage at {x},{y}"
+                );
+            }
+        }
+        // Partial last analysis block must not erase faint ink at the image edge.
+        assert!(output.get_pixel(2050, 80)[0] < 250);
+    }
+
+    #[test]
+    fn gray_border_only_whitens_beyond_the_exterior_uncertainty_band() {
+        let contour = [
+            crate::geometry::Point { x: 10., y: 10. },
+            crate::geometry::Point { x: 89., y: 10. },
+            crate::geometry::Point { x: 89., y: 89. },
+            crate::geometry::Point { x: 10., y: 89. },
+        ];
+        let mut gray = GrayImage::from_pixel(100, 100, Luma([190]));
+        PageBorder::new(&contour).clean_gray(&mut gray, 2, &[]);
+        assert_eq!(gray.get_pixel(3, 50)[0], 255);
+        assert_eq!(gray.get_pixel(8, 50)[0], 190);
+        assert_eq!(gray.get_pixel(10, 50)[0], 190);
+        assert_eq!(gray.get_pixel(50, 50)[0], 190);
+        let before = gray.clone();
+        PageBorder::new(&[]).clean_gray(&mut gray, 2, &[]);
+        assert!(gray == before);
     }
     #[test]
     fn constant_paper_levels_are_white_and_black_is_not_inverted() {

@@ -54,41 +54,68 @@ impl Ink {
     }
 }
 
+/// Ink is more than 12 levels darker than the mean of the 51-pixel box around
+/// it, clipped to the image; seed paper is at least 0.65 of the
+/// 90th-percentile tone.
 fn threshold(gray: &GrayImage) -> Ink {
+    const REACH: usize = 25;
     let (w, h) = (gray.width() as usize, gray.height() as usize);
-    let mut sum = vec![0_u64; (w + 1) * (h + 1)];
-    for y in 0..h {
-        let mut row = 0_u64;
-        for x in 0..w {
-            row += u64::from(gray.get_pixel(x as u32, y as u32)[0]);
-            sum[(y + 1) * (w + 1) + x + 1] = sum[y * (w + 1) + x + 1] + row;
-        }
-    }
+    let tones = gray.as_raw();
+    let widths: Vec<u32> = (0..w)
+        .map(|x| ((x + REACH + 1).min(w) - x.saturating_sub(REACH)) as u32)
+        .collect();
+    // Tone sums over the box rows of each column, and their running total
+    // from `REACH` columns before the image to as many past it: the box of
+    // column `x` then spans entries `x` and `x + 2 * REACH + 1`.
+    let mut columns = vec![0_u32; w];
+    let mut total = vec![0_u32; w + 2 * REACH + 1];
+    let mut rows = 0..0;
     let mut pixels = vec![0.; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let (x0, x1, y0, y1) = (
-                x.saturating_sub(25),
-                (x + 26).min(w),
-                y.saturating_sub(25),
-                (y + 26).min(h),
-            );
-            let s = sum[y1 * (w + 1) + x1] + sum[y0 * (w + 1) + x0]
-                - sum[y1 * (w + 1) + x0]
-                - sum[y0 * (w + 1) + x1];
-            let mean = s as f64 / ((x1 - x0) * (y1 - y0)) as f64;
-            pixels[y * w + x] = if f64::from(gray.get_pixel(x as u32, y as u32)[0]) < mean - 12. {
-                1.
-            } else {
-                0.
-            };
+    for (y, (pixels, row)) in pixels
+        .chunks_exact_mut(w)
+        .zip(tones.chunks_exact(w))
+        .enumerate()
+    {
+        let next = y.saturating_sub(REACH)..(y + REACH + 1).min(h);
+        for entering in tones[rows.end * w..next.end * w].chunks_exact(w) {
+            for (sum, tone) in columns.iter_mut().zip(entering) {
+                *sum += u32::from(*tone);
+            }
+        }
+        for leaving in tones[rows.start * w..next.start * w].chunks_exact(w) {
+            for (sum, tone) in columns.iter_mut().zip(leaving) {
+                *sum -= u32::from(*tone);
+            }
+        }
+        rows = next;
+        let mut running = 0;
+        for (total, sum) in total[REACH + 1..].iter_mut().zip(&columns) {
+            running += sum;
+            *total = running;
+        }
+        total[REACH + w..].fill(running);
+        let height = rows.len() as u32;
+        let boxes = total.iter().zip(&total[2 * REACH + 1..]);
+        for (((pixel, tone), width), (left, right)) in
+            pixels.iter_mut().zip(row).zip(&widths).zip(boxes)
+        {
+            // `tone < sum / area - 12.` in floating point decides the same: the
+            // quotient is never within rounding of a whole level it is not on.
+            let darker = (u32::from(*tone) + 12) * width * height < right - left;
+            *pixel = f64::from(u8::from(darker));
         }
     }
-    let mut tones = gray.as_raw().clone();
-    tones.sort_unstable();
-    let reference = f64::from(tones[tones.len() * 9 / 10]);
-    let seed_paper = gray
-        .as_raw()
+    let mut histogram = [0_usize; 256];
+    for tone in tones {
+        histogram[usize::from(*tone)] += 1;
+    }
+    let mut count = 0;
+    let reference = histogram.iter().position(|tones| {
+        count += tones;
+        count > w * h * 9 / 10
+    });
+    let reference = reference.map_or(0., |tone| tone as f64);
+    let seed_paper = tones
         .iter()
         .map(|v| f64::from(*v) >= reference * 0.65)
         .collect();
@@ -101,6 +128,20 @@ fn threshold(gray: &GrayImage) -> Ink {
     }
 }
 
+/// Row bits, 64 to a word, as seen `shift` rows further up; rows past the end
+/// are unset.
+fn rows_below(bits: &[u64], shift: usize) -> impl Iterator<Item = u64> + '_ {
+    let (words, offset) = (shift / 64, shift % 64);
+    let word = move |index: usize| bits.get(index).copied().unwrap_or(0);
+    (words..words + bits.len()).map(move |index| {
+        if offset == 0 {
+            word(index)
+        } else {
+            word(index) >> offset | word(index + 1) << (64 - offset)
+        }
+    })
+}
+
 #[derive(Clone)]
 struct Hit {
     y: [f64; 5],
@@ -108,32 +149,60 @@ struct Hit {
 }
 fn probes(profile: &[f64]) -> Vec<Hit> {
     let mut candidates = vec![];
+    // Row maxima over each pooling radius in turn, with a bit per row for
+    // whether they reach the response every line of a comb needs. Each radius
+    // widens the previous one.
+    let mut pools: Vec<(Vec<f64>, Vec<u64>)> = vec![];
     for space in 3_usize..=24 {
         if 4 * space >= profile.len() {
             continue;
         }
         let radius = (space as f64 * 0.12).round().max(1.) as usize;
-        let pooled: Vec<f64> = (0..profile.len())
-            .map(|y| {
-                profile[y.saturating_sub(radius)..(y + radius + 1).min(profile.len())]
-                    .iter()
-                    .copied()
-                    .fold(0., f64::max)
-            })
-            .collect();
+        while pools.len() < radius {
+            let narrower = pools.last().map_or(profile, |(pooled, _)| pooled);
+            let pooled: Vec<f64> = (0..profile.len())
+                .map(|y| {
+                    narrower[y.saturating_sub(1)..(y + 2).min(profile.len())]
+                        .iter()
+                        .copied()
+                        .fold(0., f64::max)
+                })
+                .collect();
+            let present = pooled
+                .chunks(64)
+                .map(|rows| {
+                    rows.iter()
+                        .enumerate()
+                        .fold(0, |bits, (row, v)| bits | u64::from(*v >= 0.12) << row)
+                })
+                .collect();
+            pools.push((pooled, present));
+        }
+        let (pooled, present) = &pools[radius - 1];
         let n = profile.len() - 4 * space;
-        let score: Vec<f64> = (0..n)
-            .map(|y| {
-                let lines: [f64; 5] = std::array::from_fn(|k| pooled[y + k * space]);
-                if lines.iter().any(|v| *v < 0.12) {
-                    0.
-                } else {
-                    lines.iter().sum::<f64>() / 5.
-                }
-            })
-            .collect();
-        for y in 1..n.saturating_sub(1) {
-            if score[y] < 0.26 || score[y] < score[y - 1] || score[y] <= score[y + 1] {
+        let score = |y: usize| {
+            let lines: [f64; 5] = std::array::from_fn(|k| pooled[y + k * space]);
+            if lines.iter().any(|v| *v < 0.12) {
+                0.
+            } else {
+                lines.iter().sum::<f64>() / 5.
+            }
+        };
+        // A missing line zeroes the score, and nearly every row lacks one.
+        let mut complete = present.clone();
+        for k in 1..5 {
+            for (rows, line) in complete.iter_mut().zip(rows_below(present, k * space)) {
+                *rows &= line;
+            }
+        }
+        let complete = complete.iter().enumerate().flat_map(|(word, rows)| {
+            std::iter::successors(Some(*rows), |rows| Some(rows & rows.wrapping_sub(1)))
+                .take_while(|rows| *rows != 0)
+                .map(move |rows| word * 64 + rows.trailing_zeros() as usize)
+        });
+        for y in complete.filter(|y| (1..n.saturating_sub(1)).contains(y)) {
+            let peak = score(y);
+            if peak < 0.26 || peak < score(y - 1) || peak <= score(y + 1) {
                 continue;
             }
             let yy = std::array::from_fn(|k| {
@@ -148,10 +217,7 @@ fn probes(profile: &[f64]) -> Vec<Hit> {
                 .windows(2)
                 .all(|v| v[1] - v[0] >= 0.65 * space as f64 && v[1] - v[0] <= 1.35 * space as f64)
             {
-                candidates.push(Hit {
-                    y: yy,
-                    score: score[y],
-                });
+                candidates.push(Hit { y: yy, score: peak });
             }
         }
     }
@@ -325,16 +391,22 @@ fn staff_ink_quality(ink: &Ink, staff: &Staff, sx: f64, sy: f64) -> f64 {
 fn staffs(ink: &Ink, sx: f64, sy: f64) -> Vec<Staff> {
     let mut tracks: Vec<Vec<(usize, [f64; 5])>> = vec![];
     let stride = 6;
-    for x in (4..ink.w.saturating_sub(4)).step_by(stride) {
-        let profile: Vec<f64> = (0..ink.h)
-            .map(|y| {
-                ink.pixels[y * ink.w + x - 4..y * ink.w + x + 5]
-                    .iter()
-                    .sum::<f64>()
-                    / 9.
-            })
-            .collect();
-        let hits = probes(&smooth(&profile, 0.55));
+    let columns: Vec<usize> = (4..ink.w.saturating_sub(4)).step_by(stride).collect();
+    let column_hits: Vec<Vec<Hit>> = columns
+        .par_iter()
+        .map(|x| {
+            let profile: Vec<f64> = (0..ink.h)
+                .map(|y| {
+                    ink.pixels[y * ink.w + x - 4..y * ink.w + x + 5]
+                        .iter()
+                        .sum::<f64>()
+                        / 9.
+                })
+                .collect();
+            probes(&smooth(&profile, 0.55))
+        })
+        .collect();
+    for (x, hits) in columns.into_iter().zip(column_hits) {
         let mut costs = vec![];
         for (i, track) in tracks.iter().enumerate() {
             let (last_x, last) = track.last().unwrap();
@@ -343,16 +415,17 @@ fn staffs(ink: &Ink, sx: f64, sy: f64) -> Vec<Staff> {
             }
             let space = (last[4] - last[0]) / 4.;
             let old = track[track.len().saturating_sub(5)];
+            let expected: [f64; 5] = std::array::from_fn(|k| {
+                let slope = if *last_x > old.0 {
+                    ((last[k] - old.1[k]) / (*last_x - old.0) as f64).clamp(-0.3, 0.3)
+                } else {
+                    0.
+                };
+                last[k] + slope * (x - last_x) as f64
+            });
             for (j, hit) in hits.iter().enumerate() {
                 let offset = (0..5)
-                    .map(|k| {
-                        let slope = if *last_x > old.0 {
-                            ((last[k] - old.1[k]) / (*last_x - old.0) as f64).clamp(-0.3, 0.3)
-                        } else {
-                            0.
-                        };
-                        (last[k] + slope * (x - last_x) as f64 - hit.y[k]).abs()
-                    })
+                    .map(|k| (expected[k] - hit.y[k]).abs())
                     .fold(0., f64::max);
                 let difference = ((hit.y[4] - hit.y[0]) / 4. - space).abs();
                 if offset < 3_f64.max(space * 0.65).max((x - last_x) as f64 * 0.12)
@@ -384,6 +457,7 @@ fn staffs(ink: &Ink, sx: f64, sy: f64) -> Vec<Staff> {
             }
         }
     }
+    let planes = trace::Planes::new(ink);
     let out: Vec<Staff> = tracks
         .into_par_iter()
         .filter_map(|track| {
@@ -391,7 +465,7 @@ fn staffs(ink: &Ink, sx: f64, sy: f64) -> Vec<Staff> {
             if ((last - first) as f64) < (ink.w as f64 * 0.05) || track.len() < 4 {
                 return None;
             }
-            trace::staff(ink, &track, sx, sy)
+            trace::staff(&planes, &track, sx, sy)
         })
         .collect();
     // Dense lyrics can complete a false, widely spaced five-line comb across
@@ -435,6 +509,18 @@ fn staffs(ink: &Ink, sx: f64, sy: f64) -> Vec<Staff> {
     let mut selected = stitch_staves(ink, selected, sx, sy);
     selected.sort_by(|a, b| median(a.y[2].clone()).total_cmp(&median(b.y[2].clone())));
     selected
+}
+
+/// Re-measure vertical ink in a rectified preview while retaining staff identities.
+pub(crate) fn detect_bars_on_staves(image: &RgbImage, data: &Observations) -> Result<Vec<Barline>> {
+    data.validate()?;
+    if image.dimensions() != (data.width, data.height) {
+        return Err(Error::Invalid(
+            "bar preview dimensions differ from staff observations",
+        ));
+    }
+    let ink = threshold(&crate::rendering::output::grayscale(image));
+    Ok(bars(&ink, &data.staves, 1., 1.))
 }
 
 /// Native image-to-observations baseline. No external Python/OMR dependency.
@@ -492,7 +578,20 @@ pub fn crop_page(image: &RgbImage, region: &crate::detection::PageRegion) -> Res
     }
     .validate()?;
     let [x0, y0, x1, y1] = region.bounds();
-    let mut crop = imageops::crop_imm(image, x0, y0, x1 - x0, y1 - y0).to_image();
+    let (width, height) = (x1 - x0, y1 - y0);
+    // Validated bounds lie inside the image, so whole rows copy without per-pixel access.
+    let row = width as usize * 3;
+    let mut pixels = Vec::with_capacity(row * height as usize);
+    for source in image
+        .as_raw()
+        .chunks_exact(image.width() as usize * 3)
+        .skip(y0 as usize)
+        .take(height as usize)
+    {
+        pixels.extend_from_slice(&source[x0 as usize * 3..][..row]);
+    }
+    let mut crop =
+        RgbImage::from_raw(width, height, pixels).expect("crop buffer matches its dimensions");
     let local = local_region(region, x0, y0);
     let mask = region_mask(
         &local,
@@ -501,11 +600,14 @@ pub fn crop_page(image: &RgbImage, region: &crate::detection::PageRegion) -> Res
         1.,
         1.,
     );
-    for (inside, pixel) in mask.iter().zip(crop.pixels_mut()) {
-        if !inside {
-            *pixel = image::Rgb([255; 3]);
-        }
-    }
+    crop.par_chunks_mut(row.max(1))
+        .zip(mask.par_chunks((width as usize).max(1)))
+        .for_each(|(pixels, mask)| {
+            let (pixels, _) = pixels.as_chunks_mut::<3>();
+            for (pixel, _) in pixels.iter_mut().zip(mask).filter(|(_, inside)| !**inside) {
+                *pixel = [255; 3];
+            }
+        });
     Ok(crop)
 }
 
@@ -576,26 +678,24 @@ pub(crate) fn detect_masked(
     let width = image.width().min(max_width);
     let height =
         (f64::from(image.height()) * f64::from(width) / f64::from(image.width())).round() as u32;
-    let gray = image::DynamicImage::ImageRgb8(image.clone()).into_luma8();
+    let gray = crate::detection::resample::luma(image);
     let analysis = imageops::resize(&gray, width, height, imageops::FilterType::Triangle);
     let mut ink = threshold(&analysis);
     let color = imageops::resize(image, width, height, imageops::FilterType::Triangle);
-    for (i, pixel) in color.pixels().enumerate() {
+    for (paper, pixel) in ink.seed_paper.iter_mut().zip(color.pixels()) {
         let high = *pixel.0.iter().max().unwrap() as f64;
         let low = *pixel.0.iter().min().unwrap() as f64;
-        ink.seed_paper[i] &= high - low <= high * 0.35;
+        *paper &= high - low <= high * 0.35;
     }
     let sx = f64::from(width) / f64::from(image.width());
     let sy = f64::from(height) / f64::from(image.height());
     if let Some(region) = region {
         let allowed = region_mask(region, ink.w, ink.h, sx, sy);
-        for y in 0..ink.h {
-            for x in 0..ink.w {
-                let index = y * ink.w + x;
-                if !allowed[index] {
-                    ink.pixels[index] = 0.;
-                    ink.seed_paper[index] = false;
-                }
+        let pixels = ink.pixels.iter_mut().zip(&mut ink.seed_paper);
+        for ((pixel, paper), inside) in pixels.zip(&allowed) {
+            if !inside {
+                *pixel = 0.;
+                *paper = false;
             }
         }
         ink.allowed = Some(allowed);
@@ -653,8 +753,8 @@ pub fn detect_staff_edges_with_region_mask(
     let height = (f64::from(image.height()) * f64::from(width) / f64::from(image.width()))
         .round()
         .max(1.) as u32;
-    let gray = image::DynamicImage::ImageRgb8(image.clone()).into_luma8();
-    let analysis = imageops::resize(&gray, width, height, imageops::FilterType::Triangle);
+    let gray = crate::detection::resample::luma(image);
+    let analysis = crate::detection::resample::resize_triangle(&gray, width, height);
     let mut ink = threshold(&analysis);
     if let Some(region) = region {
         // Validate topology after a whole-polygon affine normalization. The
@@ -715,6 +815,86 @@ pub fn detect_staff_edges_with_region_mask(
         f64::from(width) / f64::from(image.width()),
         f64::from(height) / f64::from(image.height()),
     ))
+}
+
+#[cfg(test)]
+mod raster_tests {
+    use super::*;
+
+    #[test]
+    fn threshold_equals_its_floating_point_definition() {
+        // Wider and taller than one box, with flat, noisy and edged areas.
+        let (w, h) = (83, 67);
+        let gray = GrayImage::from_fn(w, h, |x, y| {
+            let noise = (x * 31 + y * 17 + x * y) % 23;
+            let stroke = if x % 19 < 2 || y % 29 == 5 { 60 } else { 0 };
+            image::Luma([(120 + 4 * (x % 30) + noise - stroke) as u8])
+        });
+        let ink = threshold(&gray);
+        let tone = |x: u32, y: u32| f64::from(gray.get_pixel(x, y)[0]);
+        let mut tones = gray.as_raw().clone();
+        tones.sort_unstable();
+        let reference = f64::from(tones[tones.len() * 9 / 10]);
+        let mut inked = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let (x0, x1) = (x.saturating_sub(25), (x + 26).min(w));
+                let (y0, y1) = (y.saturating_sub(25), (y + 26).min(h));
+                let sum = (y0..y1)
+                    .flat_map(|yy| (x0..x1).map(move |xx| (xx, yy)))
+                    .map(|(xx, yy)| u64::from(gray.get_pixel(xx, yy)[0]))
+                    .sum::<u64>();
+                let mean = sum as f64 / ((x1 - x0) * (y1 - y0)) as f64;
+                let expected = f64::from(u8::from(tone(x, y) < mean - 12.));
+                let index = (y * w + x) as usize;
+                assert_eq!(ink.pixels[index], expected, "x={x}, y={y}");
+                assert_eq!(ink.seed_paper[index], tone(x, y) >= reference * 0.65);
+                inked += expected as usize;
+            }
+        }
+        assert!(inked > 100 && inked < (w * h) as usize / 2);
+    }
+
+    #[test]
+    fn rows_below_shift_bits_across_words() {
+        let bits = [
+            0x8000_0000_0000_0001,
+            0x0000_0000_0000_0002,
+            0x4000_0000_0000_0000,
+        ];
+        let row =
+            |bits: &[u64], row: usize| bits.get(row / 64).is_some_and(|w| w >> (row % 64) & 1 == 1);
+        for shift in [0, 1, 63, 64, 65, 126, 127, 128, 191, 192, 500] {
+            let shifted: Vec<u64> = rows_below(&bits, shift).collect();
+            assert_eq!(shifted.len(), bits.len());
+            for y in 0..192 {
+                assert_eq!(
+                    row(&shifted, y),
+                    row(&bits, y + shift),
+                    "shift={shift}, y={y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn probes_find_combs_at_any_row_and_need_all_five_lines() {
+        let comb = |top: usize, space: usize, lines: usize| {
+            let mut profile = vec![0.; 400];
+            for k in 0..lines {
+                profile[top + k * space] = 1.;
+            }
+            probes(&profile)
+        };
+        for (top, space) in [(5, 9), (58, 12), (120, 20), (300, 24)] {
+            let hits = comb(top, space, 5);
+            assert_eq!(hits.len(), 1, "top={top}, space={space}");
+            let expected: [f64; 5] = std::array::from_fn(|k| (top + k * space) as f64);
+            assert_eq!(hits[0].y, expected);
+            assert_eq!(hits[0].score, 1.);
+            assert!(comb(top, space, 4).is_empty());
+        }
+    }
 }
 
 #[cfg(test)]

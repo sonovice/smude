@@ -1,6 +1,6 @@
 //! Staff-scale robust local regression of traced ink centres, before geometry
 //! or live overlays see them. Short symbol edges are not page curvature.
-use crate::math::median;
+use crate::math::{median, median_in_place};
 
 fn quadratic(x: &[f64], y: &[f64], weights: &[f64]) -> Option<[f64; 3]> {
     let mut s = [0.; 5];
@@ -92,6 +92,9 @@ pub(super) fn smooth_curves<const N: usize>(
     radius: f64,
     max_delta: f64,
 ) {
+    const FITS: usize = 3;
+    let (mut x, mut spatial, mut y, mut weights) = (vec![], vec![], vec![], vec![]);
+    let (mut residual, mut ranked) = (vec![], vec![]);
     for (origin, output) in target {
         let start = source.partition_point(|(x, _)| *x < *origin - radius);
         let end = source.partition_point(|(x, _)| *x <= *origin + radius);
@@ -99,30 +102,40 @@ pub(super) fn smooth_curves<const N: usize>(
         if local.len() < 5 {
             continue;
         }
-        let x: Vec<_> = local.iter().map(|(x, _)| (x - *origin) / radius).collect();
-        let spatial: Vec<_> = x
-            .iter()
-            .map(|x| (1. - x.abs().powi(3)).max(0.).powi(3))
-            .collect();
+        x.clear();
+        x.extend(local.iter().map(|(x, _)| (x - *origin) / radius));
+        spatial.clear();
+        spatial.extend(
+            x.iter()
+                .map(|x: &f64| (1. - x.abs().powi(3)).max(0.).powi(3)),
+        );
         for (k, value) in output.iter_mut().enumerate() {
-            let y: Vec<_> = local.iter().map(|(_, y)| y[k]).collect();
-            let mut weights = spatial.clone();
+            y.clear();
+            y.extend(local.iter().map(|(_, y)| y[k]));
+            weights.clone_from(&spatial);
             let mut prediction = *value;
-            for _ in 0..3 {
+            for fit in 1..=FITS {
                 let Some(coeff) = quadratic(&x, &y, &weights) else {
                     break;
                 };
                 prediction = coeff[0];
-                let residual: Vec<_> = x
-                    .iter()
-                    .zip(&y)
-                    .map(|(x, y)| y - coeff[0] - coeff[1] * x - coeff[2] * x * x)
-                    .collect();
-                let center = median(residual.clone());
-                let sigma = (1.4826
-                    * median(residual.iter().map(|r| (r - center).abs()).collect()))
-                .max(0.15);
-                for ((weight, spatial), residual) in weights.iter_mut().zip(&spatial).zip(residual)
+                // The last fit is final; its residuals would reweight nothing.
+                if fit == FITS {
+                    break;
+                }
+                residual.clear();
+                residual.extend(
+                    x.iter()
+                        .zip(&y)
+                        .map(|(x, y)| y - coeff[0] - coeff[1] * x - coeff[2] * x * x),
+                );
+                ranked.clone_from(&residual);
+                let center = median_in_place(&mut ranked);
+                for (deviation, residual) in ranked.iter_mut().zip(&residual) {
+                    *deviation = (residual - center).abs();
+                }
+                let sigma = (1.4826 * median_in_place(&mut ranked)).max(0.15);
+                for ((weight, spatial), residual) in weights.iter_mut().zip(&spatial).zip(&residual)
                 {
                     let u = (residual - center) / (4.685 * sigma);
                     *weight = spatial * (1. - u * u).max(0.).powi(2);

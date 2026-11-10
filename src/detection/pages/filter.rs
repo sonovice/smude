@@ -59,6 +59,10 @@ pub(super) fn filter(
             true
         }
     });
+    // A lone proposal has no duplicate to overlap.
+    if regions.len() < 2 {
+        return rejected;
+    }
     // Compare actual polygons, not bounding boxes: adjacent curved pages can
     // have overlapping boxes. Fixed original-coordinate sampling is independent
     // of proposal order, crop dimensions and the eventual warp.

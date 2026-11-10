@@ -6,7 +6,7 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::{Observations, Point, StaffEdge};
+use crate::geometry::{Observations, Point, StaffEdge, VerticalPath};
 
 const N: usize = 8;
 const ARC_STEPS: usize = 2048;
@@ -34,6 +34,7 @@ pub struct GcsReport {
     pub staff_groups: usize,
     pub full_bar_paths: usize,
     pub edge_paths: usize,
+    pub auxiliary_vertical_paths: usize,
     pub boundary_columns: Vec<crate::geometry::BoundaryColumn>,
     pub height_width_ratio: Option<f64>,
     pub aspect_constraint: &'static str,
@@ -254,6 +255,7 @@ impl GcsMap {
             staff_groups: 0,
             full_bar_paths: 0,
             edge_paths: 0,
+            auxiliary_vertical_paths: 0,
             boundary_columns: vec![],
             height_width_ratio: None,
             aspect_constraint: "not supplied",
@@ -425,7 +427,36 @@ impl GcsMap {
         paper: Option<[Point; 4]>,
         principal_point: Option<Point>,
     ) -> Result<Self> {
+        Self::fit_with_verticals(data, edges, height_width_ratio, paper, principal_point, &[])
+    }
+
+    /// Fit additional measured shafts with a capped, robust total influence.
+    /// These paths are not bars and never create cross-staff memberships.
+    pub fn fit_with_verticals(
+        data: &Observations,
+        edges: &[StaffEdge],
+        height_width_ratio: Option<f64>,
+        paper: Option<[Point; 4]>,
+        principal_point: Option<Point>,
+        verticals: &[VerticalPath],
+    ) -> Result<Self> {
         data.validate()?;
+        if verticals.iter().any(|path| {
+            !path.weight.is_finite()
+                || !(0.0..=1.0).contains(&path.weight)
+                || path.points.len() < 3
+                || path.points.windows(2).any(|p| p[1].y <= p[0].y)
+                || path.points.iter().any(|p| {
+                    !p.x.is_finite()
+                        || !p.y.is_finite()
+                        || p.x < 0.
+                        || p.y < 0.
+                        || p.x > (data.width - 1) as f64
+                        || p.y > (data.height - 1) as f64
+                })
+        }) {
+            return Err(Error::Invalid("invalid auxiliary GCS vertical evidence"));
+        }
         if height_width_ratio.is_some_and(|r| !r.is_finite() || r <= 0.) {
             return Err(Error::Invalid("invalid GCS page ratio"));
         }
@@ -460,7 +491,12 @@ impl GcsMap {
         }) {
             return Err(Error::Invalid("invalid GCS staff edge evidence"));
         }
-        let observations = FitData::new(data, edges, height_width_ratio, paper);
+        let mut observations = FitData::new(data, edges, height_width_ratio, paper);
+        observations.verticals = verticals
+            .iter()
+            .filter(|p| p.weight > 0.)
+            .map(|p| (sample_path(&p.points, 8), p.weight))
+            .collect();
         // Model contours describe the continuous pixel-cell edge, which may
         // lie past the final integer pixel centre. Expand the certified camera
         // rectangle to include those points without moving/clamping them or
@@ -621,6 +657,7 @@ impl GcsMap {
         best.report.rejected_steps = rejected;
         best.report.staff_groups = data.staves.len();
         best.report.full_bar_paths = data.barlines.len();
+        best.report.auxiliary_vertical_paths = observations.verticals.len();
         best.report.edge_paths = observations.edges.len();
         best.report.boundary_columns = observations.boundary_columns.clone();
         best.report.height_width_ratio = height_width_ratio;
@@ -782,6 +819,7 @@ fn paper_camera_seed(
 struct FitData {
     staffs: Vec<[Vec<Point>; 5]>,
     bars: Vec<Vec<Point>>,
+    verticals: Vec<(Vec<Point>, f64)>,
     edges: Vec<(Vec<Point>, f64)>,
     boundary_columns: Vec<crate::geometry::BoundaryColumn>,
     space: f64,
@@ -844,6 +882,7 @@ impl FitData {
         Self {
             staffs,
             bars,
+            verticals: vec![],
             edges,
             boundary_columns: crate::geometry::corrections::system_boundaries::detect(
                 data,
@@ -900,6 +939,19 @@ impl FitData {
             out.extend(
                 p.iter()
                     .map(|p| weight * robust((p.x - mean) / output_space)),
+            );
+        }
+        // Dense note passages must not outweigh the full staff/bar geometry.
+        // Eight samples per shaft; total squared weight is capped at 0.15² of
+        // staff evidence even when hundreds of heads have been detected.
+        let stem_weight = 0.15
+            * (self.staffs.len() as f64 * 120. / (self.verticals.len().max(1) * 8) as f64).sqrt();
+        for (path, confidence) in &self.verticals {
+            let p: Vec<_> = path.iter().map(|p| map.forward(*p)).collect();
+            let mean = p.iter().map(|p| p.x).sum::<f64>() / p.len() as f64;
+            out.extend(
+                p.iter()
+                    .map(|p| stem_weight * confidence * robust((p.x - mean) / output_space)),
             );
         }
         for (path, w) in &self.edges {

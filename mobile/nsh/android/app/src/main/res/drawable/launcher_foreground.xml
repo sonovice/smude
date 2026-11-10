@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Center the square artwork in 66 of the adaptive layer's 108 units.
+     The gold corners stay inside circular and rounded launcher masks. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetLeft="19.444444%" android:insetTop="19.444444%"
+    android:insetRight="19.444444%" android:insetBottom="19.444444%">
+    <bitmap android:src="@drawable/launcher_artwork"
+        android:gravity="fill" android:filter="true" />
+</inset>

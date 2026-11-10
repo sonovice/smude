@@ -3,7 +3,24 @@
   "private": true,
   "version": "2.0.0-alpha.1",
   "type": "module",
-  "scripts": { "dev": "vite --host 0.0.0.0", "build": "tsc --noEmit && vite build", "tauri": "tauri" },
-  "dependencies": { "@tauri-apps/api": "^2", "@tauri-apps/plugin-dialog": "^2" },
-  "devDependencies": { "@tauri-apps/cli": "2.12.4", "typescript": "^5", "vite": "^7" }
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "test": "node --test tests/*.test.mjs",
+    "tauri": "tauri",
+    "design:ios": "cd nsh && native/ios/package.sh && xcrun simctl install booted '.nsh/out/Smude UI.app' && xcrun simctl launch booted com.gridnotelabs.smude.design",
+    "design:test": "cd nsh && cargo test",
+    "design:check": "cd nsh && cargo check --all-targets",
+    "design:package": "cd nsh && native/ios/package.sh",
+    "design:android": "cd nsh && android/build.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4",
+    "typescript": "^5",
+    "vite": "^7"
+  }
 }

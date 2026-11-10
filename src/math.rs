@@ -2,12 +2,18 @@
 use crate::geometry::Point;
 
 pub(crate) fn median(mut values: Vec<f64>) -> f64 {
-    values.sort_by(f64::total_cmp);
+    median_in_place(&mut values)
+}
+
+/// The median of a sorted copy, by selection: `values` is left partitioned.
+pub(crate) fn median_in_place(values: &mut [f64]) -> f64 {
     let n = values.len();
+    let (below, middle, _) = values.select_nth_unstable_by(n / 2, f64::total_cmp);
     if n.is_multiple_of(2) {
-        (values[n / 2 - 1] + values[n / 2]) / 2.
+        let lower = below.iter().copied().max_by(f64::total_cmp);
+        (lower.expect("median of an empty slice") + *middle) / 2.
     } else {
-        values[n / 2]
+        *middle
     }
 }
 

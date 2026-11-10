@@ -36,6 +36,9 @@ fn cli_content_crop_keeps_output_pixels_and_geometry_consistent() {
             bars.push(json!({"staff":s,"x":[x as f64,x as f64],"y":[center-16,center+16],"aligned_staffs":[]}));
         }
     }
+    // Genuine partial coverage, rather than gray manufactured by post-blurring
+    // an otherwise perfectly binary identity render.
+    source.put_pixel(100, 90, Rgb([210; 3]));
     let image = root.join("source.png");
     let observations = root.join("geometry.json");
     source.save(&image).unwrap();
@@ -154,12 +157,12 @@ fn cli_content_crop_keeps_output_pixels_and_geometry_consistent() {
         "grayscale_seconds",
         "binarization_seconds",
         "print_normalization_seconds",
-        "print_antialias_seconds",
         "png_write_seconds",
         "perspective_seconds",
     ] {
         assert!(report["profile"][stage].as_f64().unwrap() > 0.);
     }
+    assert_eq!(report["profile"]["print_antialias_seconds"], 0.);
     assert_eq!(report["profile"]["native_detection_seconds"], 0.);
     let components: f64 = report["profile"]
         .as_object()
@@ -214,6 +217,85 @@ fn cli_content_crop_keeps_output_pixels_and_geometry_consistent() {
             .as_f64()
             .unwrap()
             > 0.
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn gray_rim_cleanup_does_not_reuse_the_wide_text_warp_guard() {
+    let root = std::env::temp_dir().join(format!(
+        "smude-rim-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let mut source = RgbImage::from_pixel(1200, 1600, Rgb([225; 3]));
+    let mut staves = vec![];
+    for center in [350, 650, 950, 1250] {
+        let rows: Vec<_> = (-2..=2)
+            .map(|k| vec![f64::from(center + k * 20); 5])
+            .collect();
+        staves.push(json!({"x":[100.,350.,600.,850.,1100.],"y":rows}));
+        for k in -2..=2 {
+            for x in 100..=1100 {
+                source.put_pixel(x, (center + k * 20) as u32, Rgb([40; 3]));
+            }
+        }
+    }
+    for y in 200..1450 {
+        for x in 1147..1154 {
+            source.put_pixel(x, y, Rgb([80; 3]));
+        }
+    }
+    source.save(root.join("source.png")).unwrap();
+    fs::write(
+        root.join("geometry.json"),
+        serde_json::to_vec(&json!({"width":1200,"height":1600,"staves":staves,"barlines":[]}))
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        root.join("contour.json"),
+        br#"[{"x":10,"y":10},{"x":1190,"y":10},{"x":1190,"y":1590},{"x":10,"y":1590}]"#,
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_smude-v2"))
+        .arg("--image")
+        .arg(root.join("source.png"))
+        .arg("--out")
+        .arg(root.join("out"))
+        .arg("--geometry")
+        .arg(root.join("geometry.json"))
+        .arg("--geometry-contour")
+        .arg(root.join("contour.json"))
+        .args([
+            "--no-perspective",
+            "--no-text-dewarp",
+            "--no-final-crop",
+            "--render-backend",
+            "cpu",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let clean = image::open(root.join("out/rectified-clean.png"))
+        .unwrap()
+        .to_luma8();
+    assert_eq!(
+        clean.get_pixel(1150, 950)[0],
+        255,
+        "detached rim was protected as music"
+    );
+    assert!(
+        clean.get_pixel(1080, 950)[0] < 100,
+        "real staff endpoint was erased"
     );
     fs::remove_dir_all(root).unwrap();
 }

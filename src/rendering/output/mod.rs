@@ -1,23 +1,33 @@
 //! Final output preparation; these images never become detection input.
+mod a4;
+mod appearance;
 mod border;
+mod color;
 mod crop;
 mod distance;
+mod paper;
 #[cfg(test)]
 mod tests;
 mod tone;
 
+pub use a4::A4Frame;
+pub(crate) use appearance::preserve_color;
 pub use border::{
     apply_binary_cleanup, apply_binary_cleanup_with_contour, whiten_gray_border, whiten_page_border,
 };
+#[cfg(feature = "application")]
+pub(crate) use crop::cropped;
 pub use crop::{content_crop, page_crop};
-pub use tone::{antialias_print, binarize_sauvola, normalize_paper};
+pub use color::enhance_color;
+pub use paper::{enhance_print, normalize_paper};
+pub(crate) use tone::grayscale;
+#[cfg(feature = "application")]
+pub(crate) use tone::normalize_text_analysis;
+pub use tone::{antialias_print, binarize_sauvola};
 
-use border::{apply_binary_cleanup_impl, whiten_gray_border_impl, whiten_page_border_impl};
+use border::{whiten_exterior_impl, whiten_gray_border_impl, whiten_page_border_impl};
 use image::GrayImage;
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
-};
+use std::sync::OnceLock;
 
 /// Shared page geometry for binary and gray cleanup. Distance fields depend
 /// only on the perimeter, not on tone, so compute each at most once per page.
@@ -26,10 +36,6 @@ pub(crate) struct PageBorder<'a> {
     mask: OnceLock<Vec<u8>>,
     rim: OnceLock<Vec<u16>>,
     boundary: OnceLock<Vec<u16>>,
-    use_gpu: bool,
-    gpu_calls: AtomicUsize,
-    gpu_error: OnceLock<String>,
-    gpu_nanoseconds: AtomicU64,
 }
 
 impl<'a> PageBorder<'a> {
@@ -39,49 +45,33 @@ impl<'a> PageBorder<'a> {
             mask: OnceLock::new(),
             rim: OnceLock::new(),
             boundary: OnceLock::new(),
-            use_gpu: false,
-            gpu_calls: AtomicUsize::new(0),
-            gpu_error: OnceLock::new(),
-            gpu_nanoseconds: AtomicU64::new(0),
         }
-    }
-    pub(crate) fn with_gpu(mut self, enabled: bool) -> Self {
-        // Full-page distance readbacks regress on the tested Android Vulkan
-        // device. Keep its exact parallel CPU transform while still using
-        // GPU bicubic sampling and paper normalization.
-        self.use_gpu = enabled && !cfg!(target_os = "android");
-        if enabled && cfg!(target_os = "android") {
-            let _ = self
-                .gpu_error
-                .set("CPU distance fields selected on Android after device profiling".into());
-        }
-        self
-    }
-    pub(crate) fn gpu_stats(&self) -> (usize, f64, Option<String>) {
-        (
-            self.gpu_calls.load(Ordering::Relaxed),
-            self.gpu_nanoseconds.load(Ordering::Relaxed) as f64 / 1e9,
-            self.gpu_error.get().cloned(),
-        )
-    }
-    #[cfg(feature = "gpu-render")]
-    fn record_gpu(&self, start: std::time::Instant) {
-        self.gpu_calls.fetch_add(1, Ordering::Relaxed);
-        self.gpu_nanoseconds
-            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     pub(crate) fn whiten_binary(&self, image: &mut GrayImage, margin: u32) -> usize {
         whiten_page_border_impl(image, self.contour, margin, false, None, Some(self))
     }
-    pub(crate) fn clean_gray(
-        &self,
-        gray: &mut GrayImage,
-        raw: &GrayImage,
-        binary: &GrayImage,
-        margin: u32,
-        protected: &[[f64; 4]],
-    ) {
-        apply_binary_cleanup_impl(gray, raw, binary, Some(self.contour), Some(self));
+    /// Remove shape-confirmed page rims while preserving measured content and
+    /// the uncertain contour band. No Sauvola mask decides which ink survives.
+    pub(crate) fn clean_color(&self, rgb: &mut image::RgbImage, margin: u32) {
+        let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+        let mask = self
+            .mask
+            .get_or_init(|| border::page_mask(self.contour, w, h));
+        let margin = margin.min(u32::from(u16::MAX - 1)) as u16;
+        let distance = distance::distance_to_contour(self.contour, w, h, margin + 1);
+        use rayon::prelude::*;
+        rgb.as_mut()
+            .par_chunks_mut(3)
+            .zip(mask)
+            .zip(distance)
+            .for_each(|((p, inside), d)| {
+                if *inside == 0 && d > margin {
+                    p.fill(255);
+                }
+            });
+    }
+    pub(crate) fn clean_gray(&self, gray: &mut GrayImage, margin: u32, protected: &[[f64; 4]]) {
         whiten_gray_border_impl(gray, self.contour, margin, protected, Some(self));
+        whiten_exterior_impl(gray, self.contour, margin, self);
     }
 }

@@ -1,0 +1,13 @@
+{
+  "name": "Smude UI",
+  "id": "com.gridnotelabs.smude.design",
+  "version": "0.1.0",
+  "build": 38,
+  "appearance": "dark",
+  "statusBar": {
+    "foreground": "light"
+  },
+  "rust": ".",
+  "root": "App",
+  "icon": "assets/app-icon.png"
+}

@@ -1,4 +1,5 @@
 //! CPU reference sampler: full-precision inverse geometry and bicubic reconstruction.
+use crate::geometry::fit::Nearby;
 use crate::geometry::{Geometry, Point};
 use crate::{Error, Result};
 use image::{Rgb, RgbImage};
@@ -31,15 +32,28 @@ fn sample(image: &RgbImage, p: Point) -> [u8; 3] {
     // than recomputing both polynomials for every one of the 16 source pixels.
     let wx = [-1, 0, 1, 2].map(|i| weight(p.x - (x + i) as f64));
     let wy = [-1, 0, 1, 2].map(|j| weight(p.y - (y + j) as f64));
+    let (width, height) = (i64::from(image.width()), i64::from(image.height()));
+    if x >= 1 && y >= 1 && x + 2 < width && y + 2 < height {
+        // All sixteen taps are inside the image: read each row of four as one
+        // byte run, accumulating in the same order as the general loop below.
+        let stride = width as usize * 3;
+        let first = (y - 1) as usize * stride + (x - 1) as usize * 3;
+        for (j, wy) in wy.iter().enumerate() {
+            let run = &image.as_raw()[first + j * stride..][..12];
+            for (pixel, wx) in run.chunks_exact(3).zip(wx) {
+                let w = wx * wy;
+                for c in 0..3 {
+                    sum[c] += w * f64::from(pixel[c]);
+                }
+            }
+        }
+        return sum.map(|v| v.round().clamp(0., 255.) as u8);
+    }
     for j in -1..=2 {
         for i in -1..=2 {
             let w = wx[(i + 1) as usize] * wy[(j + 1) as usize];
             let (xx, yy) = (x + i, y + j);
-            let pixel = if xx < 0
-                || yy < 0
-                || xx >= i64::from(image.width())
-                || yy >= i64::from(image.height())
-            {
+            let pixel = if xx < 0 || yy < 0 || xx >= width || yy >= height {
                 Rgb([255; 3])
             } else {
                 *image.get_pixel(xx as u32, yy as u32)
@@ -63,17 +77,25 @@ impl Geometry {
         let [x0, y0, x1, y1] = self.report().bounds;
         let pixels = u64::from(width) * u64::from(height);
         let mut bytes = vec![255; pixels as usize * 3];
+        let xs: Vec<_> = (0..width)
+            .map(|i| x0 + (x1 - x0) * f64::from(i) / f64::from(width - 1))
+            .collect();
         bytes
             .par_chunks_mut(width as usize * 3)
             .enumerate()
-            .for_each(|(j, row)| {
-                let y = y0 + (y1 - y0) * j as f64 / f64::from(height - 1);
-                let inverse = self.inverse_scanline(y);
-                for (i, pixel) in row.chunks_exact_mut(3).enumerate() {
-                    let x = x0 + (x1 - x0) * i as f64 / f64::from(width - 1);
-                    pixel.copy_from_slice(&sample(image, inverse(x)));
-                }
-            });
+            .for_each_init(
+                || vec![Point { x: 0., y: 0. }; width as usize],
+                |points, (j, row)| {
+                    let y = y0 + (y1 - y0) * j as f64 / f64::from(height - 1);
+                    // Mapping the whole row first lets its source reads
+                    // start before the samples that need them.
+                    self.inverse_scanline(y)
+                        .fill(&xs, points, &mut Nearby::default());
+                    for (pixel, p) in row.chunks_exact_mut(3).zip(points.iter()) {
+                        pixel.copy_from_slice(&sample(image, *p));
+                    }
+                },
+            );
         RgbImage::from_raw(width, height, bytes)
             .ok_or(Error::Invalid("invalid rendered image buffer"))
     }

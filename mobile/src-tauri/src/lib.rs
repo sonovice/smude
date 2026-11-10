@@ -2,7 +2,7 @@
 //! in the same smude-geometry crate used by the CLI and desktop application.
 use image::{ImageDecoder, ImageReader};
 use serde::Serialize;
-use smude_geometry::application::{DetectionStage, OutputKind, Settings};
+use smude_geometry::application::{DetectionStage, DewarpModel, OutputKind, Settings};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::io::Write;
 use std::{
@@ -306,7 +306,11 @@ async fn benchmark_models(app: tauri::AppHandle, path: String) -> Result<(), Str
     }).await.map_err(|e|e.to_string())?
 }
 #[tauri::command]
-async fn process_image(app: tauri::AppHandle, path: String) -> Result<ResultPages, String> {
+async fn process_image(
+    app: tauri::AppHandle,
+    path: String,
+    model: Option<DewarpModel>,
+) -> Result<ResultPages, String> {
     let jobs = app.state::<Jobs>();
     if jobs.busy.swap(true, Ordering::AcqRel) {
         return Err("Eine Seite wird bereits verarbeitet.".into());
@@ -352,6 +356,7 @@ async fn process_image(app: tauri::AppHandle, path: String) -> Result<ResultPage
                 .and_then(|p| fs::read_to_string(p.join("render-backend")).ok())
         });
         let settings = Settings {
+            dewarp_model: model.unwrap_or_default(),
             render_backend: match backend.as_deref().map(str::trim) {
                 Some("cpu") => smude_geometry::RenderBackend::Cpu,
                 Some("gpu") => smude_geometry::RenderBackend::Gpu,

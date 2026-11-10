@@ -15,6 +15,14 @@ pub(super) struct Shear {
 }
 
 impl Shear {
+    pub(super) fn identity(y0: f64, y1: f64) -> Self {
+        Self {
+            systems: vec![],
+            knots: vec![y0, y1],
+            values: vec![0., 0.],
+            derivatives: vec![0., 0.],
+        }
+    }
     pub(super) fn at(&self, y: f64) -> f64 {
         if y <= self.knots[0] || y >= self.knots[self.knots.len() - 1] {
             return 0.;

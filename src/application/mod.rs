@@ -1,4 +1,7 @@
 //! One processing engine for the CLI and desktop app.
+mod bar_refinement;
+mod cropped_score;
+mod decode;
 mod options;
 mod pages;
 mod preview_map;
@@ -7,9 +10,10 @@ mod profile;
 mod progress;
 pub use preview_map::PreviewMap;
 pub use progress::{DetectionProgress, DetectionStage, ProgressObserver};
+pub use progress::{ProcessingEvent, ProcessingObserver, ProcessingStage};
 
 use crate::geometry::Observations;
-pub use options::{CropMode, Options, PageLayout, SpreadLayout};
+pub use options::{CropMode, DewarpModel, Options, PageLayout, SpreadLayout};
 use pages::process_pages;
 use process::process;
 use profile::{StepProfile, finish_profile};
@@ -39,6 +43,7 @@ impl OutputKind {
 }
 #[derive(Clone, Debug)]
 pub struct RenderedPage {
+    pub quality: crate::detection::quality::CaptureQuality,
     pub id: String,
     pub directory: PathBuf,
     pub mapping: Option<std::sync::Arc<PreviewMap>>,
@@ -58,6 +63,7 @@ pub struct ProcessingResult {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub dewarp_model: DewarpModel,
     pub detect_pages: bool,
     pub page_layout: PageLayout,
     pub spread_layout: SpreadLayout,
@@ -67,6 +73,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            dewarp_model: DewarpModel::default(),
             detect_pages: true,
             page_layout: PageLayout::Auto,
             spread_layout: SpreadLayout::SideBySide,
@@ -91,11 +98,23 @@ pub fn process_file_with_progress(
     settings: &Settings,
     progress: Option<ProgressObserver>,
 ) -> Result<ProcessingResult, Box<dyn std::error::Error>> {
+    process_file_with_observers(input, output, settings, progress, None)
+}
+/// Observe image measurements and/or processing boundaries without changing pixels.
+pub fn process_file_with_observers(
+    input: &Path,
+    output: &Path,
+    settings: &Settings,
+    progress: Option<ProgressObserver>,
+    processing_progress: Option<ProcessingObserver>,
+) -> Result<ProcessingResult, Box<dyn std::error::Error>> {
     run(&Options {
         progress,
+        processing_progress,
         image: input.to_owned(),
         out: output.to_owned(),
         no_pages: !settings.detect_pages,
+        direction_mesh: settings.dewarp_model == DewarpModel::Mesh,
         page_layout: settings.page_layout,
         spread_layout: settings.spread_layout,
         no_text_dewarp: !settings.text_correction,
@@ -106,6 +125,14 @@ pub fn process_file_with_progress(
 
 /// Advanced processing entry point shared with the CLI. No argument parsing.
 pub fn run(args: &Options) -> Result<ProcessingResult, Box<dyn std::error::Error>> {
+    args.processing(ProcessingEvent::Stage(ProcessingStage::Preparing));
+    let result = run_inner(args);
+    if result.is_ok() {
+        args.processing(ProcessingEvent::Finished);
+    }
+    result
+}
+fn run_inner(args: &Options) -> Result<ProcessingResult, Box<dyn std::error::Error>> {
     if !args.binary_page_margin.is_finite() || !(0. ..=0.02).contains(&args.binary_page_margin) {
         return Err("binary page margin must be a finite fraction in 0..0.02".into());
     }
@@ -141,6 +168,8 @@ pub fn run(args: &Options) -> Result<ProcessingResult, Box<dyn std::error::Error
         let mut source = None;
         let detection_start = Instant::now();
         let data: Observations = if let Some(path) = &args.geometry {
+            args.processing(ProcessingEvent::PageStarted { index: 0, count: 1 });
+            args.processing(ProcessingEvent::Stage(ProcessingStage::Analysis));
             profile.failure_stage = Some("observations_load");
             let start = Instant::now();
             let loaded = fs::read(path)
@@ -151,9 +180,15 @@ pub fn run(args: &Options) -> Result<ProcessingResult, Box<dyn std::error::Error
         } else {
             profile.failure_stage = Some("decode");
             let start = Instant::now();
-            let decoded = image::open(&args.image).map(|image| image.to_rgb8());
+            let decoded = decode::open_rgb(&args.image);
             profile.decode_seconds = start.elapsed().as_secs_f64();
             source = Some(decoded?);
+            let image = source.as_ref().unwrap();
+            args.processing(ProcessingEvent::InputPixels(
+                u64::from(image.width()) * u64::from(image.height()),
+            ));
+            args.processing(ProcessingEvent::PageStarted { index: 0, count: 1 });
+            args.processing(ProcessingEvent::Stage(ProcessingStage::Analysis));
             profile.failure_stage = Some("native_detection");
             let start = Instant::now();
             let on_staves =
@@ -179,11 +214,15 @@ pub fn run(args: &Options) -> Result<ProcessingResult, Box<dyn std::error::Error
         )
     })();
     finish_profile(&args.out, &mut profile, &result)?;
+    if result.is_ok() {
+        args.processing(ProcessingEvent::PageFinished { index: 0 });
+    }
     result.map(|summary| ProcessingResult {
         pages: if args.no_render || args.detect_only {
             vec![]
         } else {
             vec![RenderedPage {
+                quality: summary.quality,
                 id: "1".into(),
                 directory: args.out.clone(),
                 mapping: summary.mapping,

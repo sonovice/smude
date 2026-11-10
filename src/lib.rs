@@ -13,6 +13,7 @@ pub mod detection;
 mod error;
 pub mod geometry;
 mod math;
+mod parallel;
 #[cfg(feature = "render")]
 pub mod rendering;
 

@@ -12,6 +12,9 @@ pub(super) struct StepProfile {
     pub(super) analysis_retry_seconds: f64,
     pub(super) source_png_write_seconds: f64,
     pub(super) native_detection_seconds: f64,
+    pub(super) capture_quality_seconds: f64,
+    pub(super) page_detection_seconds: f64,
+    pub(super) visible_exterior_seconds: f64,
     pub(super) staff_edge_detection_seconds: f64,
     pub(super) text_analysis_render_seconds: f64,
     pub(super) text_detection_seconds: f64,
@@ -21,6 +24,9 @@ pub(super) struct StepProfile {
     pub(super) input_validation_seconds: f64,
     pub(super) perspective_seconds: f64,
     pub(super) gcs_seconds: f64,
+    pub(super) direction_mesh_seconds: f64,
+    pub(super) stem_detection_seconds: f64,
+    pub(super) bar_refinement_seconds: f64,
     pub(super) vertical_correction_seconds: f64,
     pub(super) staff_conditioning_seconds: f64,
     pub(super) staff_warp_seconds: f64,
@@ -37,6 +43,7 @@ pub(super) struct StepProfile {
     pub(super) print_antialias_seconds: f64,
     pub(super) binary_border_seconds: f64,
     pub(super) final_crop_seconds: f64,
+    pub(super) final_framing_seconds: f64,
     pub(super) png_write_seconds: f64,
     pub(super) report_write_seconds: f64,
     pub(super) total_seconds: f64,
@@ -74,6 +81,9 @@ impl StepProfile {
             + self.analysis_retry_seconds
             + self.source_png_write_seconds
             + self.native_detection_seconds
+            + self.capture_quality_seconds
+            + self.page_detection_seconds
+            + self.visible_exterior_seconds
             + self.staff_edge_detection_seconds
             + self.text_analysis_render_seconds
             + self.text_detection_seconds
@@ -83,6 +93,9 @@ impl StepProfile {
             + self.input_validation_seconds
             + self.perspective_seconds
             + self.gcs_seconds
+            + self.direction_mesh_seconds
+            + self.stem_detection_seconds
+            + self.bar_refinement_seconds
             + self.vertical_correction_seconds
             + self.staff_conditioning_seconds
             + self.staff_warp_seconds
@@ -98,6 +111,7 @@ impl StepProfile {
             + self.print_antialias_seconds
             + self.binary_border_seconds
             + self.final_crop_seconds
+            + self.final_framing_seconds
             + self.png_write_seconds
             + self.report_write_seconds
     }

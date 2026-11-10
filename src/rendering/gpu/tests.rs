@@ -99,7 +99,7 @@ fn adaptive_map_preserves_inverse_geometry_on_an_independent_pixel_lattice() {
 
 #[test]
 #[ignore = "requires a hardware GPU; run explicitly during device validation"]
-fn gpu_bicubic_and_paper_formulas_match_cpu_reference() {
+fn gpu_bicubic_and_binary_formulas_match_cpu_reference() {
     let (geometry, source) = scene();
     let (width, height) = geometry.raster_size(None).unwrap();
     let (reference, _) = geometry
@@ -118,11 +118,10 @@ fn gpu_bicubic_and_paper_formulas_match_cpu_reference() {
     let maximum = *differences.iter().max().unwrap();
     assert!(mean < 0.3, "mean bicubic difference {mean}, max {maximum}");
     assert!(maximum <= 16, "max bicubic difference {maximum}");
-    let (gray, binary, clean) = output.tones.unwrap();
+    let (gray, binary) = output.tones.unwrap();
     let expected_gray = image::imageops::grayscale(&color);
     assert_eq!(gray, expected_gray);
     let expected_binary = crate::rendering::output::binarize_sauvola(&gray);
-    let expected_clean = crate::rendering::output::normalize_paper(&gray);
     let mismatches = binary
         .as_raw()
         .iter()
@@ -133,55 +132,4 @@ fn gpu_bicubic_and_paper_formulas_match_cpu_reference() {
         mismatches * 10000 < binary.as_raw().len(),
         "binary threshold mismatches: {mismatches}"
     );
-    let tone_error = clean
-        .as_raw()
-        .iter()
-        .zip(expected_clean.as_raw())
-        .map(|(a, b)| a.abs_diff(*b))
-        .max()
-        .unwrap();
-    assert!(tone_error <= 1, "paper normalization error {tone_error}");
-}
-
-#[test]
-#[ignore = "requires a hardware GPU; run explicitly during device validation"]
-fn gpu_distance_fields_are_exact_including_empty_fields_and_clipped_borders() {
-    for (w, h) in [(7_usize, 5_usize), (97, 301)] {
-        for cap in [1_u8, 13, 125] {
-            let mut a = vec![cap; w * h];
-            let mut b = a.clone();
-            let first = [(0_usize, 0_usize), (w - 1, h - 1), (w / 2, h / 3)];
-            let second = [(w - 1, 0_usize), (1, h / 2)];
-            for (x, y) in first {
-                a[y * w + x] = 0;
-            }
-            for empty in [true, false] {
-                if !empty {
-                    for (x, y) in second {
-                        b[y * w + x] = 0;
-                    }
-                }
-                let (actual_a, actual_b) = super::distance_pair(&a, &b, w, h, cap).unwrap();
-                for y in 0..h {
-                    for x in 0..w {
-                        let expected = |points: &[(usize, usize)]| {
-                            points
-                                .iter()
-                                .map(|(xx, yy)| x.abs_diff(*xx).max(y.abs_diff(*yy)))
-                                .min()
-                                .unwrap_or(usize::from(cap))
-                                .min(usize::from(cap)) as u8
-                        };
-                        assert_eq!(actual_a[y * w + x], expected(&first));
-                        assert_eq!(
-                            actual_b[y * w + x],
-                            expected(if empty { &[] } else { &second })
-                        );
-                    }
-                }
-            }
-        }
-    }
-    let empty = vec![481_u16; 23 * 31];
-    assert_eq!(super::distance_single(&empty, 23, 31, 481).unwrap(), empty);
 }

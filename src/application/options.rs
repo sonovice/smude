@@ -21,12 +21,22 @@ pub enum CropMode {
     Content,
 }
 
+/// Geometry family exposed by product clients; both share detection/output.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DewarpModel {
+    Gcs,
+    #[default]
+    Mesh,
+}
+
 pub struct Options {
     /// Write source/analysis images and alternate output images for diagnosis.
     /// Normal processing writes only the final paper-white image.
     pub diagnostics: bool,
     /// Optional live detection observer; events use original-image coordinates.
     pub progress: Option<super::ProgressObserver>,
+    pub processing_progress: Option<super::ProcessingObserver>,
     /// Existing Smude barlines.json in original-image pixels.
     pub geometry: Option<PathBuf>,
     /// Optional oracle/manual TL,TR,BR,BL corners (four Point objects as JSON).
@@ -55,6 +65,8 @@ pub struct Options {
     pub no_perspective: bool,
     /// Disable native GCS and retain the projective/local geometry comparison.
     pub no_gcs: bool,
+    /// Default GCS-free staff/direction mesh; false selects GCS.
+    pub direction_mesh: bool,
     /// Disable the default bounded, evidence-gated x-only system correction.
     pub no_vertical_correction: bool,
     /// Prefer a guarded projective page frame from detected near-straight sides.
@@ -85,6 +97,8 @@ pub struct Options {
     pub binary_page_margin: f64,
     /// Retain the full reconstructed canvas instead of final page/content framing.
     pub no_final_crop: bool,
+    /// Keep the observed paper framing instead of automatic DIN-A normalization.
+    pub no_a4: bool,
     /// Frame the detected paper (default), or explicitly crop tightly to ink.
     pub crop_mode: CropMode,
     /// Padding around final page/content bounds, as a fraction of the short edge.
@@ -122,6 +136,7 @@ impl Default for Options {
         Self {
             diagnostics: false,
             progress: None,
+            processing_progress: None,
             geometry: None,
             geometry_corners: None,
             geometry_contour: None,
@@ -137,6 +152,7 @@ impl Default for Options {
             perspective: false,
             no_perspective: false,
             no_gcs: false,
+            direction_mesh: true,
             no_vertical_correction: false,
             page_perspective: false,
             no_page_perspective: false,
@@ -153,6 +169,7 @@ impl Default for Options {
             analysis_width: None,
             binary_page_margin: 0.004,
             no_final_crop: false,
+            no_a4: false,
             crop_mode: CropMode::default(),
             crop_padding: 0.01,
             probe_points: None,

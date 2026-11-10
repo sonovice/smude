@@ -1,6 +1,30 @@
 import XCTest
 
 final class SmudeMobileUITests: XCTestCase {
+    func testSwitchModelsForAnExistingPhoto() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.mobile")
+        app.launchEnvironment["SMUDE_AUTORUN"] = "0"
+        app.launch()
+        XCTAssertTrue(app.switches["GCS"].waitForExistence(timeout: 15))
+        app.switches["GCS"].tap()
+        XCTAssertTrue(app.buttons["Testbild verwenden"].waitForExistence(timeout: 10))
+        app.buttons["Testbild verwenden"].tap()
+        let gcs = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@ AND label ENDSWITH %@", "1 Seite ·", " · GCS")).firstMatch
+        XCTAssertTrue(gcs.waitForExistence(timeout: 90))
+        app.switches["Mesh"].tap()
+        let mesh = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@ AND label ENDSWITH %@", "1 Seite ·", " · Mesh")).firstMatch
+        XCTAssertTrue(mesh.waitForExistence(timeout: 90))
+        XCTAssertTrue(app.buttons["Exportieren ↗"].exists)
+        let capture = XCTAttachment(screenshot: app.screenshot())
+        capture.name = "Existing photo processed with direction mesh"
+        capture.lifetime = .keepAlways; add(capture)
+        app.switches["GCS"].tap()
+        XCTAssertTrue(gcs.waitForExistence(timeout: 3), "Cached GCS result should switch immediately")
+        app.switches["Mesh"].tap()
+        XCTAssertTrue(mesh.waitForExistence(timeout: 3), "Cached mesh result should switch immediately")
+    }
+
     func testModelBackendProbe() throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.mobile")

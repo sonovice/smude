@@ -1,6 +1,5 @@
 //! Shared offscreen GPU implementation: Metal on Apple, Vulkan on Android/Linux,
 //! and Direct3D on Windows. It consumes our own fitted geometry and formulas.
-mod distance;
 mod map;
 #[cfg(test)]
 mod tests;
@@ -32,7 +31,7 @@ pub(crate) fn prewarm() {
 
 pub(crate) struct Output {
     pub color: Option<RgbImage>,
-    pub tones: Option<(GrayImage, GrayImage, GrayImage)>,
+    pub tones: Option<(GrayImage, GrayImage)>,
     pub profile: RenderProfile,
 }
 struct Context {
@@ -44,7 +43,6 @@ struct Context {
     paper: wgpu::ComputePipeline,
     adapter: String,
     timestamps: bool,
-    distance: distance::Pipeline,
 }
 
 impl Context {
@@ -85,15 +83,15 @@ impl Context {
         let memory_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Smude bicubic and paper normalization"),
+            label: Some("Smude bicubic and diagnostic binarization"),
             source: wgpu::ShaderSource::Wgsl(include_str!("render.wgsl").into()),
         });
-        let entries: Vec<_> = (0..8)
+        let entries: Vec<_> = (0..9)
             .map(|binding| wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
-                    ty: if binding == 7 {
+                    ty: if binding == 8 {
                         wgpu::BufferBindingType::Uniform
                     } else {
                         wgpu::BufferBindingType::Storage {
@@ -131,7 +129,6 @@ impl Context {
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(error.to_string());
         }
-        let distance = distance::Pipeline::new(&device)?;
         if let Some(error) = pollster::block_on(memory_scope.pop()) {
             return Err(error.to_string());
         }
@@ -144,7 +141,6 @@ impl Context {
             paper,
             adapter: format!("{} ({:?})", info.name, info.backend),
             timestamps,
-            distance,
         })
     }
 
@@ -165,7 +161,6 @@ impl Context {
             pixels * 4,
             (map.nodes.len() * 48) as u64,
             (map.dense.len() * 8) as u64,
-            if tone { pixels * 8 } else { 8 },
         ];
         if sizes
             .into_iter()
@@ -183,13 +178,17 @@ impl Context {
             .collect();
         let memory_scope = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // Written through the queue: a buffer mapped at creation is zeroed
+        // before its contents are copied in.
         let storage = |label: &str, contents: &[u8]| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents,
-                    usage: wgpu::BufferUsages::STORAGE,
-                })
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: contents.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&buffer, 0, contents);
+            buffer
         };
         let empty = |label: &str, size: u64| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -207,14 +206,10 @@ impl Context {
             bytemuck::cast_slice(&map.dense),
         );
         let rendered = empty("rendered RGB and luminance", pixels * 4);
-        let moments = empty(
-            "horizontal exact integer statistics",
-            if tone { pixels * 8 } else { 8 },
-        );
-        let tones = empty(
-            "gray binary and normalized paper",
-            if tone { pixels * 4 } else { 4 },
-        );
+        let plane = if tone { pixels * 4 } else { 4 };
+        let sums = empty("horizontal luminance sums", plane);
+        let squares = empty("horizontal squared luminance sums", plane);
+        let tones = empty("gray and diagnostic binary", plane);
         let values = [
             image.width(),
             image.height(),
@@ -233,7 +228,7 @@ impl Context {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
         let buffers = [
-            &source, &nodes, &roots, &dense, &rendered, &moments, &tones, &params,
+            &source, &nodes, &roots, &dense, &rendered, &sums, &squares, &tones, &params,
         ];
         let entries: Vec<_> = buffers
             .iter()
@@ -301,7 +296,7 @@ impl Context {
         pass(&self.render, "bicubic reconstruction", 0);
         if tone {
             pass(&self.horizontal, "horizontal statistics", 1);
-            pass(&self.paper, "paper normalization", 2);
+            pass(&self.paper, "diagnostic binarization", 2);
         }
         let mut offset = 0;
         if color {
@@ -391,27 +386,20 @@ impl Context {
         };
         let tone_images = if tone {
             let bytes = &bytes[if color { pixels as usize * 4 } else { 0 }..];
-            let (mut gray, mut binary, mut clean) = (
-                vec![0; pixels as usize],
-                vec![0; pixels as usize],
-                vec![0; pixels as usize],
-            );
+            let (mut gray, mut binary) = (vec![0; pixels as usize], vec![0; pixels as usize]);
             gray.par_chunks_mut(4096)
                 .zip(binary.par_chunks_mut(4096))
-                .zip(clean.par_chunks_mut(4096))
                 .enumerate()
-                .for_each(|(block, ((g, b), c))| {
+                .for_each(|(block, (g, b))| {
                     for j in 0..g.len() {
                         let i = (block * 4096 + j) * 4;
                         g[j] = bytes[i];
                         b[j] = bytes[i + 1];
-                        c[j] = bytes[i + 2];
                     }
                 });
             Some((
                 GrayImage::from_raw(width, height, gray).unwrap(),
                 GrayImage::from_raw(width, height, binary).unwrap(),
-                GrayImage::from_raw(width, height, clean).unwrap(),
             ))
         } else {
             None
@@ -426,60 +414,6 @@ impl Context {
             profile,
         })
     }
-}
-
-fn distance_packed(
-    seeds: &[u32],
-    width: usize,
-    height: usize,
-    cap: u16,
-) -> Result<Vec<u32>, String> {
-    let context = CONTEXT
-        .get_or_init(|| Context::new().map(Mutex::new))
-        .as_ref()
-        .map_err(Clone::clone)?;
-    let context = context
-        .lock()
-        .map_err(|_| "GPU context lock poisoned".to_string())?;
-    context.distance.run(
-        &context.device,
-        &context.queue,
-        seeds,
-        (width as u32, height as u32),
-        cap,
-    )
-}
-
-pub(crate) fn distance_pair(
-    a: &[u8],
-    b: &[u8],
-    width: usize,
-    height: usize,
-    cap: u8,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let seeds: Vec<_> = a
-        .par_iter()
-        .zip(b)
-        .map(|(a, b)| u32::from(*a == 0) | (u32::from(*b == 0) << 1))
-        .collect();
-    let packed = distance_packed(&seeds, width, height, u16::from(cap))?;
-    Ok((
-        packed.par_iter().map(|v| (v & 65535) as u8).collect(),
-        packed.par_iter().map(|v| (v >> 16) as u8).collect(),
-    ))
-}
-
-pub(crate) fn distance_single(
-    seeds: &[u16],
-    width: usize,
-    height: usize,
-    cap: u16,
-) -> Result<Vec<u16>, String> {
-    let mask: Vec<_> = seeds.par_iter().map(|v| u32::from(*v == 0)).collect();
-    Ok(distance_packed(&mask, width, height, cap)?
-        .par_iter()
-        .map(|v| (v & 65535) as u16)
-        .collect())
 }
 
 pub(crate) fn render(
@@ -511,7 +445,7 @@ pub(crate) fn render(
         .device
         .limits()
         .max_storage_buffer_binding_size;
-    if u64::from(width) * u64::from(height) * if tone { 8 } else { 4 } > limit
+    if u64::from(width) * u64::from(height) * 4 > limit
         || u64::from(image.width()) * u64::from(image.height()) * 4 > limit
     {
         return Err("Image exceeds GPU buffer binding limit".into());

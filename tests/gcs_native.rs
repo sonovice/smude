@@ -488,3 +488,96 @@ fn fractional_paper_edges_expand_certificate_without_clamping_camera_or_points()
     invalid[1].x = 400.01;
     assert!(GcsMap::fit_with_paper(&data, &[], None, Some(invalid)).is_err());
 }
+
+#[test]
+fn auxiliary_shafts_are_separate_from_bars_and_preserve_a_known_surface() {
+    use smude_geometry::geometry::VerticalPath;
+    let params = camera(1000, 1400);
+    let mut data = observations_for(&params);
+    data.barlines.clear();
+    let paths: Vec<_> = (0..5)
+        .flat_map(|i| {
+            let params = &params;
+            [-270., -90., 90., 270.]
+                .into_iter()
+                .map(move |x| VerticalPath {
+                    points: (0..9)
+                        .map(|j| {
+                            oracle(
+                                Point {
+                                    x,
+                                    y: -450. + i as f64 * 190. + j as f64 * 4.,
+                                },
+                                params,
+                            )
+                            .0
+                        })
+                        .collect(),
+                    weight: 0.8,
+                })
+        })
+        .collect();
+    let baseline = GcsMap::fit(&data, &[], None).unwrap();
+    let map = GcsMap::fit_with_verticals(&data, &[], None, None, None, &paths).unwrap();
+    let held_out_error = |map: &GcsMap| {
+        [-180., 0., 180.]
+            .iter()
+            .map(|x| {
+                let a = map.forward(oracle(Point { x: *x, y: -390. }, &params).0);
+                let b = map.forward(oracle(Point { x: *x, y: 390. }, &params).0);
+                ((b.x - a.x) / (b.y - a.y)).atan().to_degrees().abs()
+            })
+            .sum::<f64>()
+            / 3.
+    };
+    println!(
+        "independent synthetic held-out vertical angle: baseline={}, stems={}",
+        held_out_error(&baseline),
+        held_out_error(&map)
+    );
+    assert_eq!(map.report().full_bar_paths, 0);
+    assert_eq!(map.report().auxiliary_vertical_paths, 20);
+    assert!(horizontal_error(&data, Some(&map)) < 0.2);
+    // Independent, unseen shafts between the fitting shafts.
+    for x in [-180., 0., 180.] {
+        let p: Vec<_> = [-390., -200., 0., 190., 390.]
+            .map(|y| map.forward(oracle(Point { x, y }, &params).0))
+            .into();
+        let lo = p.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let hi = p.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+        assert!(hi - lo < 2., "held-out vertical deviates by {}", hi - lo);
+    }
+}
+
+#[test]
+fn invalid_auxiliary_verticals_are_rejected() {
+    use smude_geometry::geometry::VerticalPath;
+    let data = observations();
+    for path in [
+        VerticalPath {
+            points: vec![Point { x: 10., y: 10. }; 3],
+            weight: 0.8,
+        },
+        VerticalPath {
+            points: vec![
+                Point { x: 10., y: 10. },
+                Point { x: 10., y: 20. },
+                Point {
+                    x: f64::NAN,
+                    y: 30.,
+                },
+            ],
+            weight: 0.8,
+        },
+        VerticalPath {
+            points: vec![
+                Point { x: 10., y: 10. },
+                Point { x: 10., y: 20. },
+                Point { x: 10., y: 30. },
+            ],
+            weight: 2.,
+        },
+    ] {
+        assert!(GcsMap::fit_with_verticals(&data, &[], None, None, None, &[path]).is_err());
+    }
+}

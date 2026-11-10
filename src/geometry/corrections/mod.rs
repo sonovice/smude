@@ -1,7 +1,11 @@
 //! Residual corrections and regularization from musical/text observations.
+mod direction_mesh;
 pub(crate) mod local_flatten;
+pub(crate) use direction_mesh::MeshRow;
+pub use direction_mesh::{DirectionMesh, DirectionMeshReport};
 mod staff_conditioning;
 pub(crate) mod staff_extensions;
+pub(crate) mod surface_metric;
 pub(crate) mod system_boundaries;
 #[cfg(feature = "render")]
 pub(crate) mod text_warp;

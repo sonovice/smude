@@ -24,10 +24,9 @@ pub struct RenderProfile {
     pub unpack_seconds: f64,
     pub gpu_render_seconds: Option<f64>,
     pub gpu_horizontal_seconds: Option<f64>,
+    /// Historical field name: time for the GPU Sauvola diagnostic plane.
+    /// Continuous paper normalization is now a separate shared CPU stage.
     pub gpu_paper_seconds: Option<f64>,
-    pub gpu_border_distance_calls: usize,
-    pub gpu_border_distance_seconds: f64,
-    pub gpu_border_fallback_reason: Option<String>,
     pub map_evaluations: usize,
     pub map_nodes: usize,
     pub exact_map_pixels: usize,
@@ -36,6 +35,6 @@ pub struct RenderProfile {
 
 pub(crate) struct PreparedOutput {
     pub color: Option<RgbImage>,
-    pub tones: Option<(image::GrayImage, image::GrayImage, image::GrayImage)>,
+    pub tones: Option<(image::GrayImage, image::GrayImage)>,
     pub profile: RenderProfile,
 }

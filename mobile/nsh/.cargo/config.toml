@@ -1,0 +1,9 @@
+[patch.crates-io]
+nsh-platform-ios = { path = "vendor/nsh-platform-ios" }
+
+[env]
+CARGO_PROFILE_DEV_DEBUG = "0"
+CARGO_PROFILE_DEV_INCREMENTAL = "false"
+
+# ONNX Runtime requires iOS 15.1; match Rust, C/C++ and the native camera.
+IPHONEOS_DEPLOYMENT_TARGET = "15.1"

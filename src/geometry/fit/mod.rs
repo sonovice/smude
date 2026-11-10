@@ -1,6 +1,14 @@
 //! Fit and compose the reversible geometry; rasterization lives in rendering/.
+#[cfg(feature = "render")]
+mod direction_mesh;
+#[cfg(feature = "render")]
+mod page_model;
+#[cfg(feature = "render")]
+pub(crate) use page_model::PageResidualModel;
 mod system_shear;
 use super::report::{ExtrapolationReport, FitProfile, Report, Validation};
+#[cfg(feature = "render")]
+pub use direction_mesh::MeshPipelineReport;
 pub(crate) use system_shear::systems;
 use system_shear::{Shear, shear};
 
@@ -32,13 +40,89 @@ impl Flatten {
     fn inverse(&self, p: Point) -> Point {
         self.local.inverse(p)
     }
+    #[cfg(feature = "render")]
+    fn inverse_near(&self, p: Point, nearby: &mut Nearby) -> Point {
+        self.local.inverse_near(p, &mut nearby.staff_band)
+    }
+}
+
+/// What a previous [`Scanline::at`] sample found, to shorten the searches of
+/// the next sample close to it. Any state yields the same coordinates.
+#[cfg(feature = "render")]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Nearby {
+    staff_band: crate::geometry::corrections::local_flatten::Hint,
+}
+
+/// One output row of [`Geometry::inverse`] with its exactly y-dependent
+/// stages hoisted out of the pixel loop.
+#[cfg(feature = "render")]
+pub(crate) struct Scanline<'a> {
+    geometry: &'a Geometry,
+    y: f64,
+    /// Only nonzero text spans need the general inverse, since text can
+    /// change y locally.
+    text: Vec<[f64; 2]>,
+    vertical: Option<(f64, f64, f64)>,
+    mesh: Option<crate::geometry::corrections::MeshRow>,
+    shear: f64,
+}
+#[cfg(feature = "render")]
+impl Scanline<'_> {
+    pub(crate) fn at(&self, x: f64, nearby: &mut Nearby) -> Point {
+        let mut p = [Point { x, y: self.y }];
+        self.fill(&[x], &mut p, nearby);
+        p[0]
+    }
+    /// The source point of every x in this row. A sample is one long
+    /// dependency chain through all stages, so a batch of samples passes
+    /// through one stage at a time and their chains overlap.
+    pub(crate) fn fill(&self, xs: &[f64], out: &mut [Point], nearby: &mut Nearby) {
+        const BATCH: usize = 32;
+        let (geometry, y) = (self.geometry, self.y);
+        let in_text = |x: &f64| self.text.iter().any(|span| *x >= span[0] && *x <= span[1]);
+        for (xs, out) in xs.chunks(BATCH).zip(out.chunks_mut(BATCH)) {
+            if !xs.iter().all(in_text) {
+                let mut flat = [0.; BATCH];
+                let flat = &mut flat[..xs.len()];
+                flat.copy_from_slice(xs);
+                if let Some(mesh) = &self.mesh {
+                    mesh.inverse_xs(flat);
+                }
+                for (x, out) in flat.iter().zip(out.iter_mut()) {
+                    let x = self
+                        .vertical
+                        .map_or(*x, |(center, scale, a)| center + (*x - center) * scale + a);
+                    let flat = Point {
+                        x: x - self.shear,
+                        y,
+                    };
+                    *out = geometry.flat.inverse_near(flat, nearby);
+                }
+                for p in out.iter_mut() {
+                    *p = geometry.projective.inverse(*p);
+                }
+                for p in out.iter_mut() {
+                    *p = geometry.inverse_page(*p);
+                }
+            }
+            for (x, out) in xs.iter().zip(out.iter_mut()).filter(|(x, _)| in_text(x)) {
+                *out = geometry.inverse(Point { x: *x, y });
+            }
+        }
+    }
 }
 
 /// Fitted, reversible geometry. All maps use pixel coordinates and (x,y) order.
 /// No detector/model objects or intermediate raster images are retained.
 #[derive(Clone, Debug)]
 pub struct Geometry {
+    #[cfg(feature = "render")]
+    pre_page: Option<(crate::geometry::PageAnalysisMap, Point)>,
     projective: Projective,
+    direction_mesh: crate::geometry::DirectionMesh,
+    #[cfg(feature = "render")]
+    pre_frame: Option<(crate::geometry::PageAnalysisMap, Point)>,
     flat: Flatten,
     horizontal: Shear,
     vertical: crate::geometry::VerticalCorrection,
@@ -47,6 +131,18 @@ pub struct Geometry {
     report: Report,
     #[cfg(feature = "render")]
     text: Option<crate::geometry::corrections::text_warp::TextWarp>,
+}
+
+/// Optional source-coordinate evidence for the native GCS pipeline.
+#[cfg(feature = "render")]
+#[derive(Default)]
+pub struct GcsFitEvidence<'a> {
+    pub corners: Option<[Point; 4]>,
+    pub ratio: Option<f64>,
+    pub edges: &'a [StaffEdge],
+    pub vertical_correction: bool,
+    pub camera_center: Option<Point>,
+    pub vertical_paths: &'a [crate::geometry::VerticalPath],
 }
 
 impl Geometry {
@@ -82,6 +178,36 @@ impl Geometry {
         vertical_correction: bool,
         camera_center: Option<Point>,
     ) -> (Result<Self>, FitProfile) {
+        Self::fit_profiled_gcs_with_evidence(
+            data,
+            config,
+            &GcsFitEvidence {
+                corners,
+                ratio,
+                edges,
+                vertical_correction,
+                camera_center,
+                vertical_paths: &[],
+            },
+        )
+    }
+
+    /// Experimental additional shafts share the global GCS surface; they do
+    /// not create a staff-local correction or prescribe a source direction.
+    #[cfg(feature = "render")]
+    pub fn fit_profiled_gcs_with_evidence(
+        data: &Observations,
+        config: &Config,
+        evidence: &GcsFitEvidence<'_>,
+    ) -> (Result<Self>, FitProfile) {
+        let GcsFitEvidence {
+            corners,
+            ratio,
+            edges,
+            vertical_correction,
+            camera_center,
+            vertical_paths,
+        } = *evidence;
         let started = Instant::now();
         let mut profile = FitProfile::default();
         let result = (|| {
@@ -112,12 +238,13 @@ impl Geometry {
             profile.perspective_seconds = stage.elapsed().as_secs_f64();
             profile.failure_stage = Some("gcs");
             let stage = Instant::now();
-            let gcs = crate::geometry::GcsMap::fit_with_camera(
+            let gcs = crate::geometry::GcsMap::fit_with_verticals(
                 data,
                 edges,
                 ratio,
                 frame.as_ref().and(corners),
                 camera_center,
+                vertical_paths,
             )?;
             let plane_evidence = frame
                 .as_ref()
@@ -464,6 +591,10 @@ impl Geometry {
         profile.failure_stage = Some("map_validation");
         let stage = Instant::now();
         let report = Report {
+            #[cfg(feature = "render")]
+            page_model: None,
+            #[cfg(feature = "render")]
+            direction_mesh: None,
             schema: "smude.geometry.v1",
             input_width: data.width,
             input_height: data.height,
@@ -493,7 +624,12 @@ impl Geometry {
             text_warp: None,
         };
         let mut geometry = Self {
+            #[cfg(feature = "render")]
+            pre_page: None,
             projective,
+            direction_mesh: crate::geometry::DirectionMesh::default(),
+            #[cfg(feature = "render")]
+            pre_frame: None,
             flat,
             horizontal,
             vertical: crate::geometry::VerticalCorrection::default(),
@@ -523,7 +659,29 @@ impl Geometry {
             };
         }
         #[cfg(feature = "render")]
+        let p = self.pre_page.as_ref().map_or(p, |(map, shift)| {
+            let q = map.forward(p).unwrap_or(Point {
+                x: f64::NAN,
+                y: f64::NAN,
+            });
+            Point {
+                x: q.x - shift.x,
+                y: q.y - shift.y,
+            }
+        });
+        #[cfg(feature = "render")]
         let p = self.pre_gcs.as_ref().map_or(p, |m| m.forward(p));
+        #[cfg(feature = "render")]
+        let p = self.pre_frame.as_ref().map_or(p, |(frame, shift)| {
+            let q = frame.forward(p).unwrap_or(Point {
+                x: f64::NAN,
+                y: f64::NAN,
+            });
+            Point {
+                x: q.x - shift.x,
+                y: q.y - shift.y,
+            }
+        });
         let projected = self.projective.forward(p);
         if !projected.x.is_finite() || !projected.y.is_finite() {
             return Point {
@@ -538,12 +696,20 @@ impl Geometry {
                 y: f64::NAN,
             };
         }
-        let result = self.vertical.forward(self.horizontal.forward(flat));
+        let result = self
+            .direction_mesh
+            .forward(self.vertical.forward(self.horizontal.forward(flat)));
         #[cfg(feature = "render")]
         if let Some(text) = &self.text {
             return text.forward(result);
         }
         result
+    }
+    /// The protected text residual alone. `forward` is this applied to the base
+    /// map, so points traced before `add_text_curves` remain reusable after it.
+    #[cfg(feature = "render")]
+    pub fn forward_text(&self, base: Point) -> Point {
+        self.text.as_ref().map_or(base, |text| text.forward(base))
     }
     pub fn inverse(&self, p: Point) -> Point {
         if !p.x.is_finite() || !p.y.is_finite() {
@@ -554,33 +720,53 @@ impl Geometry {
         }
         #[cfg(feature = "render")]
         let p = self.text.as_ref().map_or(p, |text| text.inverse(p));
+        let p = self.direction_mesh.inverse(p);
         let p = self.projective.inverse(
             self.flat
                 .inverse(self.horizontal.inverse(self.vertical.inverse(p))),
         );
         #[cfg(feature = "render")]
-        let p = self.pre_gcs.as_ref().map_or(p, |m| m.inverse(p));
+        let p = self.inverse_page(p);
         p
     }
-    /// Hoist exactly y-dependent stages out of the pixel loop. Only nonzero
-    /// text spans need the general inverse, since text can change y locally.
+    /// The page stages of `inverse`, from projected coordinates to the source.
     #[cfg(feature = "render")]
-    pub(crate) fn inverse_scanline(&self, y: f64) -> impl Fn(f64) -> Point + '_ {
-        let text = self
-            .text
-            .as_ref()
-            .map_or_else(Vec::new, |text| text.active_row_spans(y));
-        let vertical = self.vertical.inverse_row(y);
-        let shear = self.horizontal.at(y);
-        move |x| {
-            if text.iter().any(|span| x >= span[0] && x <= span[1]) {
-                return self.inverse(Point { x, y });
-            }
-            let x = vertical.map_or(x, |(center, scale, a)| center + (x - center) * scale + a);
-            let p = self
-                .projective
-                .inverse(self.flat.inverse(Point { x: x - shear, y }));
-            self.pre_gcs.as_ref().map_or(p, |m| m.inverse(p))
+    fn inverse_page(&self, p: Point) -> Point {
+        let p = self.pre_gcs.as_ref().map_or(p, |m| m.inverse(p));
+        let p = self.pre_frame.as_ref().map_or(p, |(frame, shift)| {
+            frame
+                .inverse(Point {
+                    x: p.x + shift.x,
+                    y: p.y + shift.y,
+                })
+                .unwrap_or(Point {
+                    x: f64::NAN,
+                    y: f64::NAN,
+                })
+        });
+        self.pre_page.as_ref().map_or(p, |(map, shift)| {
+            map.inverse(Point {
+                x: p.x + shift.x,
+                y: p.y + shift.y,
+            })
+            .unwrap_or(Point {
+                x: f64::NAN,
+                y: f64::NAN,
+            })
+        })
+    }
+    #[cfg(feature = "render")]
+    pub(crate) fn inverse_scanline(&self, y: f64) -> Scanline<'_> {
+        Scanline {
+            geometry: self,
+            y,
+            text: self
+                .text
+                .as_ref()
+                .map_or_else(Vec::new, |text| text.active_row_spans(y)),
+            vertical: self.vertical.inverse_row(y),
+            mesh: self.direction_mesh.inverse_row(y),
+            shear: self.horizontal.at(y),
         }
     }
 
@@ -661,10 +847,40 @@ impl Geometry {
                 // orientation. Use the exact composition: projective map,
                 // monotone vertical map, then a determinant-one x shear.
                 #[cfg(feature = "render")]
-                let (p, pre_det) = self
-                    .pre_gcs
-                    .as_ref()
-                    .map_or((p, 1.), |m| (m.forward(p), m.jacobian_det(p)));
+                let (p, pre_det) = self.pre_page.as_ref().map_or((p, 1.), |(map, shift)| {
+                    let q = map.forward(p).unwrap_or(Point {
+                        x: f64::NAN,
+                        y: f64::NAN,
+                    });
+                    (
+                        Point {
+                            x: q.x - shift.x,
+                            y: q.y - shift.y,
+                        },
+                        map.jacobian_det(p),
+                    )
+                });
+                #[cfg(feature = "render")]
+                let (p, pre_det) = self.pre_gcs.as_ref().map_or((p, pre_det), |m| {
+                    (m.forward(p), pre_det * m.jacobian_det(p))
+                });
+                #[cfg(feature = "render")]
+                let (p, pre_det) =
+                    self.pre_frame
+                        .as_ref()
+                        .map_or((p, pre_det), |(frame, shift)| {
+                            let q = frame.forward(p).unwrap_or(Point {
+                                x: f64::NAN,
+                                y: f64::NAN,
+                            });
+                            (
+                                Point {
+                                    x: q.x - shift.x,
+                                    y: q.y - shift.y,
+                                },
+                                pre_det * frame.jacobian_det(p),
+                            )
+                        });
                 #[cfg(not(feature = "render"))]
                 let pre_det = 1.;
                 let projected = self.projective.forward(p);
@@ -672,27 +888,33 @@ impl Geometry {
                 let det = pre_det
                     * self.projective.jacobian_det(p)
                     * self.flat.local.vertical_scale(projected)
-                    * self.vertical.jacobian_det(flattened);
+                    * self.vertical.jacobian_det(flattened)
+                    * self
+                        .direction_mesh
+                        .jacobian_det(self.vertical.forward(flattened));
                 if !det.is_finite() || det <= 0. {
                     return Err(Error::Invalid("fitted geometry folds the page"));
                 }
                 min_det = min_det.min(det);
             }
         }
-        let mut line_span = 0_f64;
-        for s in &data.staves {
+        // Every staff sample is traced through the whole map: the costly part.
+        let line_spans = crate::parallel::map(&data.staves, |s| {
+            let mut span = 0_f64;
             for k in 0..5 {
                 let values: Vec<f64> =
                     s.x.iter()
                         .zip(&s.y[k])
                         .map(|(x, y)| self.forward(Point { x: *x, y: *y }).y)
                         .collect();
-                line_span = line_span.max(
+                span = span.max(
                     values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
                         - values.iter().copied().fold(f64::INFINITY, f64::min),
                 );
             }
-        }
+            span
+        });
+        let line_span = line_spans.into_iter().fold(0_f64, f64::max);
         let mut angles = vec![];
         let mut max_bend = 0_f64;
         for bar in &data.barlines {

@@ -1,0 +1,19 @@
+<resources>
+    <style name="SmudeTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:colorAccent">#FFCC66</item>
+        <item name="android:windowBackground">#151515</item>
+        <item name="android:statusBarColor">#151515</item>
+        <item name="android:navigationBarColor">#151515</item>
+    </style>
+    <style name="SmudeControlsTheme" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#FFCC66</item>
+        <item name="colorOnPrimary">#151515</item>
+        <item name="colorSecondaryContainer">#393326</item>
+        <item name="colorOnSecondaryContainer">#FFCC66</item>
+        <item name="colorSurface">#222325</item>
+        <item name="colorOnSurface">#FFFFFF</item>
+    </style>
+</resources>

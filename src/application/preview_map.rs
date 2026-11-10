@@ -11,6 +11,7 @@ pub struct PreviewMap {
     world_bounds: [f64; 4],
     raster_size: [u32; 2],
     final_crop: [u32; 4],
+    output_translation: Point,
 }
 impl PreviewMap {
     pub(super) fn new(
@@ -35,7 +36,12 @@ impl PreviewMap {
             world_bounds,
             raster_size,
             final_crop,
+            output_translation: Point { x: 0., y: 0. },
         }
+    }
+    pub(super) fn with_output_translation(mut self, translation: Point) -> Self {
+        self.output_translation = translation;
+        self
     }
     pub fn contains_source(&self, p: Point) -> bool {
         p.x.is_finite()
@@ -58,19 +64,21 @@ impl PreviewMap {
         let [x0, y0, x1, y1] = self.world_bounds;
         finite(Point {
             x: (q.x - x0) * f64::from(self.raster_size[0] - 1) / (x1 - x0)
-                - f64::from(self.final_crop[0]),
+                - f64::from(self.final_crop[0])
+                + self.output_translation.x,
             y: (q.y - y0) * f64::from(self.raster_size[1] - 1) / (y1 - y0)
-                - f64::from(self.final_crop[1]),
+                - f64::from(self.final_crop[1])
+                + self.output_translation.y,
         })
     }
     pub fn result_to_source(&self, p: Point) -> Option<Point> {
         let [x0, y0, x1, y1] = self.world_bounds;
         let q = self.geometry.inverse(Point {
             x: x0
-                + (p.x + f64::from(self.final_crop[0])) * (x1 - x0)
+                + (p.x - self.output_translation.x + f64::from(self.final_crop[0])) * (x1 - x0)
                     / f64::from(self.raster_size[0] - 1),
             y: y0
-                + (p.y + f64::from(self.final_crop[1])) * (y1 - y0)
+                + (p.y - self.output_translation.y + f64::from(self.final_crop[1])) * (y1 - y0)
                     / f64::from(self.raster_size[1] - 1),
         });
         finite(Point {
@@ -142,14 +150,17 @@ mod tests {
             None,
             [1600, 900],
             [47, 31, 1500, 800],
-        );
+        )
+        .with_output_translation(Point { x: 23., y: -17. });
         let output = map.source_to_result(source).unwrap();
         assert!(
-            (output.x - ((expected.x - bounds[0]) * 1599. / (bounds[2] - bounds[0]) - 47.)).abs()
+            (output.x - ((expected.x - bounds[0]) * 1599. / (bounds[2] - bounds[0]) - 47. + 23.))
+                .abs()
                 < 1e-9
         );
         assert!(
-            (output.y - ((expected.y - bounds[1]) * 899. / (bounds[3] - bounds[1]) - 31.)).abs()
+            (output.y - ((expected.y - bounds[1]) * 899. / (bounds[3] - bounds[1]) - 31. - 17.))
+                .abs()
                 < 1e-9
         );
         for y in (80..600).step_by(47) {
