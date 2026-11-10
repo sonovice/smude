@@ -3,6 +3,7 @@ use super::filter;
 use crate::{Error, Result};
 pub use filter::RejectedPage;
 
+use crate::detection::resample::resize_triangle_padded;
 use crate::detection::{PageRegion, PageRegions};
 
 use crate::geometry::Point;
@@ -15,7 +16,6 @@ use onnx_runtime::{
     },
     value::TensorRef,
 };
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
@@ -213,24 +213,101 @@ impl ImageModel {
     }
 }
 
-/// Loads only the classifier and compact boundary model, using ONNX Runtime CPU.
+const LAYOUT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/models/page-boundary/page-layout.onnx"
+));
+
+/// A page-point head whose ONNX session is built on first use.
+struct LazyModel {
+    name: &'static str,
+    embedded: &'static [u8],
+    output_len: usize,
+    model: OnceLock<std::result::Result<ImageModel, String>>,
+}
+impl LazyModel {
+    const fn boundary() -> Self {
+        Self {
+            name: "page-boundary",
+            embedded: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/models/page-boundary/page-boundary.onnx"
+            )),
+            output_len: 193,
+            model: OnceLock::new(),
+        }
+    }
+    const fn geometry() -> Self {
+        Self {
+            name: "page-geometry",
+            embedded: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/models/page-boundary/page-geometry.onnx"
+            )),
+            output_len: 1251,
+            model: OnceLock::new(),
+        }
+    }
+    /// Build the embedded session now, with the backend of a profiled detector.
+    fn profiled(self, accelerated: bool, directory: &Path) -> Result<Self> {
+        let model = ImageModel::embedded(
+            self.name,
+            self.embedded,
+            self.output_len,
+            accelerated,
+            Some(directory),
+        )?;
+        Ok(Self {
+            model: OnceLock::from(Ok(model)),
+            ..self
+        })
+    }
+    fn get(&self, model_dir: Option<&Path>) -> Result<&ImageModel> {
+        self.model
+            .get_or_init(|| {
+                match model_dir {
+                    Some(dir) => ImageModel::load(dir, self.name, self.output_len),
+                    None => {
+                        ImageModel::embedded(self.name, self.embedded, self.output_len, false, None)
+                    }
+                }
+                .map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(model_error)
+    }
+}
+
+/// ONNX Runtime CPU page models. The classifier is loaded up front; of the
+/// compact boundary head and the full interior head, a detector builds only
+/// those its detections ask for.
 pub struct PageDetector {
     classifier: ImageModel,
-    boundary: ImageModel,
-    geometry: OnceLock<std::result::Result<ImageModel, String>>,
+    boundary: LazyModel,
+    geometry: LazyModel,
     model_dir: Option<PathBuf>,
 }
 impl PageDetector {
     /// Load the bundled weights directly from executable memory, without files.
     pub fn embedded() -> Result<Self> {
-        Self::embedded_options(false, None)
+        Ok(Self {
+            classifier: ImageModel::embedded("page-layout", LAYOUT, 5, false, None)?,
+            boundary: LazyModel::boundary(),
+            geometry: LazyModel::geometry(),
+            model_dir: None,
+        })
     }
 
-    /// The bundled detector, loaded once per process: later scans skip session setup.
+    /// The bundled batch detector with its full interior head, loaded once per
+    /// process: later scans skip session setup.
     pub fn embedded_shared() -> Result<&'static Self> {
         static SHARED: OnceLock<std::result::Result<PageDetector, String>> = OnceLock::new();
         SHARED
-            .get_or_init(|| Self::embedded().map_err(|e| e.to_string()))
+            .get_or_init(|| {
+                let detector = Self::embedded().map_err(|e| e.to_string())?;
+                detector.geometry.get(None).map_err(|e| e.to_string())?;
+                Ok(detector)
+            })
             .as_ref()
             .map_err(model_error)
     }
@@ -239,12 +316,29 @@ impl PageDetector {
     /// Registration failures are errors, never silently reported as acceleration.
     /// Default application processing continues to use the measured CPU backend.
     pub fn embedded_profiled(accelerated: bool, directory: &Path) -> Result<Self> {
-        Self::embedded_options(accelerated, Some(directory))
+        Ok(Self {
+            classifier: ImageModel::embedded(
+                "page-layout",
+                LAYOUT,
+                5,
+                accelerated,
+                Some(directory),
+            )?,
+            // Measured detections must not include the session setup of their head.
+            boundary: LazyModel::boundary().profiled(accelerated, directory)?,
+            geometry: LazyModel::geometry(),
+            model_dir: None,
+        })
     }
 
     pub fn finish_profiling(&self) -> Result<Vec<String>> {
-        [&self.classifier, &self.boundary]
-            .into_iter()
+        let boundary = self
+            .boundary
+            .model
+            .get()
+            .and_then(|model| model.as_ref().ok());
+        std::iter::once(&self.classifier)
+            .chain(boundary)
             .map(|model| {
                 model
                     .session
@@ -256,29 +350,12 @@ impl PageDetector {
             .collect()
     }
 
-    fn embedded_options(accelerated: bool, directory: Option<&Path>) -> Result<Self> {
-        const LAYOUT: &[u8] = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/models/page-boundary/page-layout.onnx"
-        ));
-        const BOUNDARY: &[u8] = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/models/page-boundary/page-boundary.onnx"
-        ));
-        Ok(Self {
-            classifier: ImageModel::embedded("page-layout", LAYOUT, 5, accelerated, directory)?,
-            boundary: ImageModel::embedded("page-boundary", BOUNDARY, 193, accelerated, directory)?,
-            geometry: OnceLock::new(),
-            model_dir: None,
-        })
-    }
-
     /// Explicitly override bundled weights with externally supplied models.
     pub fn load(model_dir: &Path) -> Result<Self> {
         Ok(Self {
             classifier: ImageModel::load(model_dir, "page-layout", 5)?,
-            boundary: ImageModel::load(model_dir, "page-boundary", 193)?,
-            geometry: OnceLock::new(),
+            boundary: LazyModel::boundary(),
+            geometry: LazyModel::geometry(),
             model_dir: Some(model_dir.into()),
         })
     }
@@ -318,32 +395,12 @@ impl PageDetector {
     ) -> Result<(PageRegions, PageDetectionReport)> {
         let started = Instant::now();
         let load_started = Instant::now();
-        let geometry_model = if full_geometry {
-            Some(
-                self.geometry
-                    .get_or_init(|| {
-                        if let Some(dir) = &self.model_dir {
-                            ImageModel::load(dir, "page-geometry", 1251)
-                        } else {
-                            ImageModel::embedded(
-                                "page-geometry",
-                                include_bytes!(concat!(
-                                    env!("CARGO_MANIFEST_DIR"),
-                                    "/models/page-boundary/page-geometry.onnx"
-                                )),
-                                1251,
-                                false,
-                                None,
-                            )
-                        }
-                        .map_err(|e| e.to_string())
-                    })
-                    .as_ref()
-                    .map_err(model_error)?,
-            )
+        let head = if full_geometry {
+            &self.geometry
         } else {
-            None
-        };
+            &self.boundary
+        }
+        .get(self.model_dir.as_deref())?;
         let full_geometry_model_load_seconds = if full_geometry {
             load_started.elapsed().as_secs_f64()
         } else {
@@ -396,15 +453,12 @@ impl PageDetector {
                 .unwrap_or_else(|| model_input(image, view, INPUT_WIDTH, INPUT_HEIGHT));
             preprocessing_seconds += t.elapsed().as_secs_f64();
             let t = Instant::now();
-            let mut raw = geometry_model
-                .unwrap_or(&self.boundary)
-                .run(&input)
-                .map_err(|e| {
-                    model_error(format!(
-                        "page-boundary source view {} failed: {e}",
-                        index + 1
-                    ))
-                })?;
+            let mut raw = head.run(&input).map_err(|e| {
+                model_error(format!(
+                    "page-boundary source view {} failed: {e}",
+                    index + 1
+                ))
+            })?;
             boundary_inference_seconds += t.elapsed().as_secs_f64();
             let t = Instant::now();
             if full_geometry {
@@ -554,42 +608,6 @@ fn portrait_padding(w: u32, h: u32) -> ([u32; 2], [u32; 2]) {
     ([pw, ph], [(pw - w) / 2, (ph - h) / 2])
 }
 
-/// First source sample and normalized weights of one output sample.
-struct Taps {
-    first: usize,
-    weights: Vec<f32>,
-}
-
-/// Triangle-filter taps for resampling `size` samples to `new_size`, in the
-/// exact f32 arithmetic of `image::imageops::resize`, which defined the
-/// preprocessing of the model training data.
-fn triangle_taps(size: u32, new_size: u32) -> Vec<Taps> {
-    let ratio = size as f32 / new_size as f32;
-    let scale = ratio.max(1.);
-    (0..new_size)
-        .map(|out| {
-            let center = (out as f32 + 0.5) * ratio;
-            let first = ((center - scale).floor() as i64).clamp(0, i64::from(size) - 1);
-            let end = ((center + scale).ceil() as i64).clamp(first + 1, i64::from(size));
-            let center = center - 0.5;
-            let mut weights: Vec<f32> = (first..end)
-                .map(|i| (1. - ((i as f32 - center) / scale).abs()).max(0.))
-                .collect();
-            let mut sum = 0.;
-            for weight in &weights {
-                sum += weight;
-            }
-            for weight in &mut weights {
-                *weight /= sum;
-            }
-            Taps {
-                first: first as usize,
-                weights,
-            }
-        })
-        .collect()
-}
-
 struct ModelInput {
     /// NHWC values in 0..=1 with constant alpha 1.
     tensor: Vec<f32>,
@@ -598,50 +616,21 @@ struct ModelInput {
 }
 
 /// Model input of one source view `[x, y, width, height]`: portrait padding by
-/// edge replication, then a separable Triangle resize, rows first.
-///
-/// Values equal an 8-bit `image::imageops::resize` of the materialized padded
-/// crop; neither the crop nor the padding is copied at source resolution.
+/// edge replication, then an 8-bit Triangle resize in the exact arithmetic of
+/// `image::imageops::resize`, which defined the preprocessing of the model
+/// training data.
 fn model_input(image: &RgbImage, view: [u32; 4], width: u32, height: u32) -> ModelInput {
-    let [x0, y0, w, h] = view.map(|v| v as usize);
     let (padded, offset) = portrait_padding(view[2], view[3]);
-    let [dx, dy] = offset.map(|v| v as usize);
-    let stride = image.width() as usize * 3;
-    let source_row = |padded_y: usize| {
-        let y = y0 + padded_y.saturating_sub(dy).min(h - 1);
-        &image.as_raw()[y * stride + x0 * 3..][..w * 3]
-    };
-    let columns = triangle_taps(padded[0], width);
-    let rows = triangle_taps(padded[1], height);
+    let resized = resize_triangle_padded(image, view, padded, offset, width, height);
     let mut tensor = vec![1_f32; (width * height) as usize * INPUT_CHANNELS];
-    tensor
-        .par_chunks_mut(width as usize * INPUT_CHANNELS)
-        .zip(&rows)
-        .for_each_init(
-            || vec![0_f32; w * 3],
-            |line, (output, taps)| {
-                // Every sum accumulates its taps in source order, as the
-                // reference does; only then are the results bit-identical.
-                line.fill(0.);
-                for (i, &weight) in taps.weights.iter().enumerate() {
-                    for (sum, &value) in line.iter_mut().zip(source_row(taps.first + i)) {
-                        *sum += f32::from(value) * weight;
-                    }
-                }
-                for (pixel, taps) in output.chunks_exact_mut(INPUT_CHANNELS).zip(&columns) {
-                    let mut sums = [0_f32; 3];
-                    for (i, &weight) in taps.weights.iter().enumerate() {
-                        let x = (taps.first + i).saturating_sub(dx).min(w - 1) * 3;
-                        for (sum, value) in sums.iter_mut().zip(&line[x..x + 3]) {
-                            *sum += value * weight;
-                        }
-                    }
-                    for (value, sum) in pixel.iter_mut().zip(sums) {
-                        *value = sum.clamp(0., 255.).round() / 255.;
-                    }
-                }
-            },
-        );
+    for (input, pixel) in tensor
+        .chunks_exact_mut(INPUT_CHANNELS)
+        .zip(resized.pixels())
+    {
+        for (value, sample) in input.iter_mut().zip(pixel.0) {
+            *value = f32::from(sample) / 255.;
+        }
+    }
     ModelInput {
         tensor,
         padded,

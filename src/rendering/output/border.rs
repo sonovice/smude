@@ -36,15 +36,15 @@ pub(super) fn whiten_exterior_impl(
     } else {
         Cow::Owned(distance_to_contour(contour, w, h, margin + 1))
     };
-    gray.as_mut()
-        .par_iter_mut()
-        .zip(mask)
-        .zip(boundary.as_ref())
-        .for_each(|((pixel, inside), distance)| {
+    // Only tiles reaching beyond the page hold such pixels.
+    for run in Tiles::below(mask, w, h, 1).spans().runs() {
+        let fields = mask[run.clone()].iter().zip(&boundary[run.clone()]);
+        for (pixel, (inside, distance)) in gray.as_mut()[run].iter_mut().zip(fields) {
             if *inside == 0 && *distance > margin {
                 *pixel = 255;
             }
-        });
+        }
+    }
 }
 
 /// Width of the strip along the page perimeter in which rims are sought.
@@ -86,11 +86,14 @@ pub(super) fn apply_binary_cleanup_impl(
     // binary core. Extend only from confirmed removed ink; retained foreground
     // wins the distance competition, including its antialiased fringe.
     let cap: u8 = ((w.min(h) / 80).clamp(4, 64) + 1) as u8;
+    let reach = usize::from(cap) - 1;
+    // One vectorized pass fills fresh memory faster than threads sharing it;
+    // `&&` would leave a branch in it that ink-heavy pages mispredict.
     let seeds = |removed: bool| -> Vec<u8> {
-        (raw.as_raw().par_iter())
-            .zip(cleaned.as_raw().par_iter())
+        (raw.as_raw().iter())
+            .zip(cleaned.as_raw())
             .map(|(raw, cleaned)| {
-                if *raw == 0 && (*cleaned == 255) == removed {
+                if (*raw == 0) & ((*cleaned == 255) == removed) {
                     0
                 } else {
                     cap
@@ -102,18 +105,29 @@ pub(super) fn apply_binary_cleanup_impl(
     if !removed.contains(&0) {
         return 0;
     }
+    let seeded = Tiles::below(&removed, w, h, cap);
+    let reached = seeded.grown(reach);
+    let contour =
+        contour.filter(|p| p.len() >= 3 && p.iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+    let band = rim_band(w, h);
+    // Retained ink is consulted only where removed ink reaches and, for the
+    // reconstruction, along the perimeter; its distance is exact there once
+    // every tile within reach spreads its seeds.
+    let mut consulted = contour.map_or_else(
+        || Tiles::empty(w, h),
+        |contour| contour_tiles(contour, w, h).grown(band.into()),
+    );
+    consulted.include(&reached);
+    let retained = consulted.grown(reach);
     let mut kept = seeds(false);
     // Protected pixels take part in every decision but keep their tone.
     let frozen = |i: usize| protected.is_some_and(|mask| mask[i] != 0);
     rayon::join(
-        || capped_distance(&mut removed, w, h, cap),
-        || capped_distance(&mut kept, w, h, cap),
+        || capped_distance(&mut removed, cap, &seeded),
+        || capped_distance(&mut kept, cap, &retained),
     );
     let mut count = 0;
-    if let Some(contour) =
-        contour.filter(|p| p.len() >= 3 && p.iter().all(|p| p.x.is_finite() && p.y.is_finite()))
-    {
-        let band = rim_band(w, h);
+    if let Some(contour) = contour {
         let boundary = if let Some(prepared) = prepared {
             Cow::Borrowed(
                 prepared
@@ -125,15 +139,20 @@ pub(super) fn apply_binary_cleanup_impl(
             Cow::Owned(distance_to_contour(contour, w, h, band + 1))
         };
         let mut seen = vec![false; w * h];
-        let mut queue = vec![];
         // This is seeded reconstruction, not a wider global eroded mask. A
         // distant gray halo is removed only if connected to a proved rim core.
-        let mut next = 0;
-        while let Some(i) = find_from(&removed, 0, next) {
-            next = i + 1;
-            if gray.as_raw()[i] < 250 && boundary[i] <= band && kept[i] > 3 {
-                seen[i] = true;
-                queue.push(i);
+        let mut queue = vec![];
+        for run in seeded.spans().runs() {
+            let first = run.start;
+            let cores = removed[run]
+                .iter()
+                .enumerate()
+                .filter(|(_, removed)| **removed == 0);
+            for i in cores.map(|(offset, _)| first + offset) {
+                if gray.as_raw()[i] < 250 && boundary[i] <= band && kept[i] > 3 {
+                    seen[i] = true;
+                    queue.push(i);
+                }
             }
         }
         let mut cursor = 0;
@@ -156,20 +175,18 @@ pub(super) fn apply_binary_cleanup_impl(
             }
         }
     }
+    for run in reached.spans().runs() {
+        let first = run.start;
+        let distances = removed[run.clone()].iter().zip(&kept[run.clone()]);
+        let pixels = gray.as_mut()[run].iter_mut().zip(distances);
+        for (offset, (pixel, (removed, kept))) in pixels.enumerate() {
+            if *removed < cap && removed < kept && *pixel != 255 && !frozen(first + offset) {
+                *pixel = 255;
+                count += 1;
+            }
+        }
+    }
     count
-        + gray
-            .par_iter_mut()
-            .zip(&removed)
-            .zip(&kept)
-            .enumerate()
-            .map(|(i, ((pixel, removed), kept))| {
-                let whiten = *removed < cap && removed < kept && *pixel != 255 && !frozen(i);
-                if whiten {
-                    *pixel = 255;
-                }
-                usize::from(whiten)
-            })
-            .sum::<usize>()
 }
 
 /// Remove faint perimeter strokes which never produced a Sauvola black core.
@@ -201,7 +218,7 @@ pub(super) fn whiten_gray_border_impl(
         return 0;
     }
     let protected_mask = protected_pixel_mask(w, h, protected);
-    let ink = (gray.as_raw().par_iter())
+    let ink = (gray.as_raw().iter())
         .zip(&protected_mask)
         .map(|(tone, protected)| {
             if *protected == 0 && *tone < 255 {
@@ -319,62 +336,52 @@ pub(super) fn whiten_page_border_impl(
     if margin > 0 {
         erode_mask(&mut mask, w, h, margin as usize);
     }
-    removed += (binary.as_mut().par_chunks_mut(w))
-        .zip(mask.par_chunks(w))
-        .map(|(row, mask)| {
-            let mut removed = 0;
-            for (value, _) in row.iter_mut().zip(mask).filter(|(_, inside)| **inside == 0) {
-                removed += usize::from(*value == 0);
-                *value = 255;
-            }
-            removed
-        })
-        .sum::<usize>();
+    // Only tiles reaching beyond the eroded page hold such pixels.
+    for run in Tiles::below(&mask, w, h, 1).spans().runs() {
+        let (pixels, mask) = (&mut binary.as_mut()[run.clone()], &mask[run]);
+        // Two plain loops are vectorized where one branching loop is not.
+        removed += (pixels.iter().zip(mask))
+            .filter(|(value, inside)| **inside == 0 && **value == 0)
+            .count();
+        for (value, inside) in pixels.iter_mut().zip(mask) {
+            *value = if *inside == 0 { 255 } else { *value };
+        }
+    }
     removed
 }
 
-/// Square erosion in output pixels; outside the raster is outside the page.
-/// Rows lose `radius` pixels at both ends of every run. A pixel then survives
-/// when its column holds a full window of such survivors, tracked as run
-/// lengths so both passes stay sequential in memory.
+/// Square erosion in output pixels of a mask holding 1 inside the page and 0
+/// outside it; outside the raster is outside the page. A pixel survives when
+/// its distance to the nearest zero exceeds `radius`, and that field is swept
+/// only near the zeros.
 pub(super) fn erode_mask(mask: &mut [u8], w: usize, h: usize, radius: usize) {
-    let window = 2 * radius + 1;
-    mask.par_chunks_mut(w).for_each(|row| {
-        let mut x = 0;
-        while x < w {
-            let Some(run) = row[x..].iter().position(|v| *v != 0) else {
-                break;
-            };
-            let start = x + run;
-            let end = row[start..]
-                .iter()
-                .position(|v| *v == 0)
-                .map_or(w, |length| start + length);
-            if end - start < window {
-                row[start..end].fill(0);
-            } else {
-                row[start..start + radius].fill(0);
-                row[end - radius..end].fill(0);
+    // Erosions add up, which keeps any radius within the range of the field.
+    let mut rest = radius;
+    while rest > 0 {
+        let step = rest.min(usize::from(u8::MAX) - 2) as u8;
+        rest -= usize::from(step);
+        let cap = step + 1;
+        let zeros = Tiles::below(mask, w, h, 1);
+        let swept = zeros.swept(cap.into()).spans();
+        for run in swept.runs() {
+            for value in &mut mask[run] {
+                *value = if *value == 0 { 0 } else { cap };
             }
-            x = end;
         }
-    });
-    let mut runs = vec![0_u32; w];
-    for y in 0..h {
-        let (above, below) = mask.split_at_mut(y * w);
-        for (run, value) in runs.iter_mut().zip(&below[..w]) {
-            *run = if *value == 0 { 0 } else { *run + 1 };
-        }
-        if y >= 2 * radius {
-            // Row `y - radius` was consumed `radius` rows ago and is final now.
-            for (out, run) in above[(y - radius) * w..][..w].iter_mut().zip(&runs) {
-                *out = u8::from(*run as usize >= window);
+        capped_distance(mask, cap, &zeros);
+        for run in swept.runs() {
+            for value in &mut mask[run] {
+                *value = u8::from(*value == cap);
             }
         }
     }
-    let edge = radius.min(h) * w;
-    mask[..edge].fill(0);
-    mask[h * w - edge..].fill(0);
+    let (rows, columns) = (radius.min(h), radius.min(w));
+    mask[..rows * w].fill(0);
+    mask[(h - rows) * w..].fill(0);
+    for row in mask.chunks_mut(w.max(1)) {
+        row[..columns].fill(0);
+        row[w - columns..].fill(0);
+    }
 }
 
 pub(super) fn page_mask(contour: &[crate::geometry::Point], w: usize, h: usize) -> Vec<u8> {
@@ -425,28 +432,34 @@ fn remove_rim_components(
     let band = rim_band(w, h);
     let cap = band + 1;
     let close_band = (margin.saturating_mul(3).min(u32::from(band))) as u16;
+    let seeded = rim_tiles(mask, contour, w, h);
     let distance = if let Some(prepared) = prepared {
         Cow::Borrowed(
             prepared
                 .rim
-                .get_or_init(|| rim_distance(mask, contour, w, h, cap))
+                .get_or_init(|| rim_distance(mask, contour, w, cap, &seeded))
                 .as_slice(),
         )
     } else {
-        Cow::Owned(rim_distance(mask, contour, w, h, cap))
+        Cow::Owned(rim_distance(mask, contour, w, cap, &seeded))
     };
     // 1: unvisited ink within the band. 2: ink beyond it, which disqualifies
     // any component it touches; gray cleanup instead cuts components there.
-    let mut state: Vec<u8> = binary
-        .as_raw()
-        .par_iter()
-        .zip(distance.par_iter())
-        .map(|(ink, distance)| match (*ink, *distance <= band) {
-            (0, true) => 1,
-            (0, false) if !gray_frames => 2,
-            _ => 0,
-        })
-        .collect();
+    // Only the band and the pixels beside it are ever looked at.
+    let zone = seeded.grown(usize::from(band) + 1).spans();
+    let mut state = vec![0_u8; w * h];
+    for run in zone.runs() {
+        let inks = binary.as_raw()[run.clone()]
+            .iter()
+            .zip(&distance[run.clone()]);
+        for (state, (ink, distance)) in state[run].iter_mut().zip(inks) {
+            *state = match (*ink, *distance <= band) {
+                (0, true) => 1,
+                (0, false) if !gray_frames => 2,
+                _ => 0,
+            };
+        }
+    }
     let corners = CORNERS.map(|(sx, sy)| {
         contour
             .iter()
@@ -460,9 +473,17 @@ fn remove_rim_components(
     let mut pending: Vec<Vec<usize>> = vec![];
     let mut corner_fragments = vec![];
     let mut removed = 0;
-    let mut next = 0;
-    while let Some(seed) = find_from(&state, 1, next) {
-        next = seed + 1;
+    let mut runs = zone.runs();
+    let mut run = 0..0;
+    loop {
+        let Some(seed) = find_from(&state[..run.end], 1, run.start) else {
+            match runs.next() {
+                Some(next) => run = next,
+                None => break,
+            }
+            continue;
+        };
+        run.start = seed + 1;
         component.clear();
         component.push(seed);
         state[seed] = 0;
@@ -592,6 +613,9 @@ fn remove_rim_components(
             removed += points.len();
             continue;
         }
+        if points.len() < 3 {
+            continue;
+        }
         let n = points.len() as f64;
         let cx = points.iter().map(|i| (i % w) as f64).sum::<f64>() / n;
         let cy = points.iter().map(|i| (i / w) as f64).sum::<f64>() / n;
@@ -603,7 +627,7 @@ fn remove_rim_components(
             along += (dx * tx + dy * ty).powi(2);
             across += (-dx * ty + dy * tx).powi(2);
         }
-        if points.len() < 3 || along < 2. * across || along / n < 2. {
+        if along < 2. * across || along / n < 2. {
             continue;
         }
         let normal = points.iter().map(|i| f64::from(distance[*i])).sum::<f64>() / n;
@@ -662,7 +686,7 @@ fn remove_rim_components(
 /// Confirmed rim pixels in a coarse grid that records which rim distances each
 /// cell holds. A box query then reads pixels only in cells that straddle the
 /// box edge and contain a matching distance.
-struct RimSupport {
+pub(super) struct RimSupport {
     cell: usize,
     columns: usize,
     width: usize,
@@ -672,7 +696,7 @@ struct RimSupport {
 }
 
 impl RimSupport {
-    fn new(w: usize, h: usize, gap: usize, cap: u16) -> Self {
+    pub(super) fn new(w: usize, h: usize, gap: usize, cap: u16) -> Self {
         let cell = (gap / 4).max(1);
         let columns = w.div_ceil(cell);
         let cells = columns * h.div_ceil(cell);
@@ -687,7 +711,7 @@ impl RimSupport {
         }
     }
 
-    fn extend(&mut self, points: &[usize], distance: &[u16]) {
+    pub(super) fn extend(&mut self, points: &[usize], distance: &[u16]) {
         for &i in points {
             let cell = (i / self.width / self.cell) * self.columns + i % self.width / self.cell;
             let level = usize::from(distance[i]);
@@ -697,7 +721,12 @@ impl RimSupport {
     }
 
     /// Whether any pixel inside the inclusive box lies at one of `levels`.
-    fn supports(&self, [x0, y0, x1, y1]: [usize; 4], levels: &[u64], distance: &[u16]) -> bool {
+    pub(super) fn supports(
+        &self,
+        [x0, y0, x1, y1]: [usize; 4],
+        levels: &[u64],
+        distance: &[u16],
+    ) -> bool {
         let cell = self.cell;
         (y0 / cell..=y1 / cell).any(|row| {
             (x0 / cell..=x1 / cell).any(|column| {
@@ -727,7 +756,7 @@ impl RimSupport {
 /// runs with bounding boxes; a run that cannot beat the best distance is
 /// skipped, and the rest are scanned in contour order so ties resolve exactly
 /// as in a full scan.
-struct ContourTangents<'a> {
+pub(super) struct ContourTangents<'a> {
     contour: &'a [crate::geometry::Point],
     runs: Vec<[f64; 4]>,
 }
@@ -735,7 +764,7 @@ struct ContourTangents<'a> {
 impl<'a> ContourTangents<'a> {
     const RUN: usize = 32;
 
-    fn new(contour: &'a [crate::geometry::Point]) -> Self {
+    pub(super) fn new(contour: &'a [crate::geometry::Point]) -> Self {
         let runs = (0..contour.len())
             .step_by(Self::RUN)
             .map(|start| {
@@ -755,7 +784,7 @@ impl<'a> ContourTangents<'a> {
     }
 
     /// Unit tangent of the first segment at minimal distance from the point.
-    fn nearest(&self, cx: f64, cy: f64) -> (f64, f64) {
+    pub(super) fn nearest(&self, cx: f64, cy: f64) -> (f64, f64) {
         let n = self.contour.len();
         let scan = |run: usize, closest: &mut f64, tangent: &mut (f64, f64)| {
             for i in run * Self::RUN..((run + 1) * Self::RUN).min(n) {

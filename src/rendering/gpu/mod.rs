@@ -15,6 +15,10 @@ use std::{
 use wgpu::util::DeviceExt;
 
 static CONTEXT: OnceLock<Result<Mutex<Context>, String>> = OnceLock::new();
+/// Neighbours whose window sums one shader invocation derives from each other.
+const RUN: u32 = 32;
+/// Parts of a page the GPU reconstructs while the map of the next is built.
+const BANDS: u32 = 4;
 
 pub(crate) fn prewarm() {
     static START: Once = Once::new();
@@ -144,10 +148,62 @@ impl Context {
         })
     }
 
+    /// A storage buffer of `size` bytes. `fill` writes the bytes that follow
+    /// a given number of them; it runs in parallel on blocks of the staging
+    /// memory of the queue, which the contents thus reach without a copy.
+    fn upload(
+        &self,
+        label: &str,
+        size: usize,
+        fill: impl Fn(usize, wgpu::WriteOnly<[u8]>) + Sync,
+    ) -> Result<wgpu::Buffer, String> {
+        const BLOCK: usize = 1 << 18;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            // An empty buffer cannot be bound.
+            size: size.max(8) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if let Some(size) = wgpu::BufferSize::new(size as u64) {
+            let mut view = self
+                .queue
+                .write_buffer_with(&buffer, 0, size)
+                .ok_or_else(|| format!("GPU upload of {label} failed"))?;
+            // Only a view of known size can move to another thread.
+            let (blocks, rest) = view.slice(..).into_chunks::<BLOCK>();
+            fill(blocks.len() * BLOCK, rest);
+            let blocks: Vec<_> = blocks.into_iter().collect();
+            blocks
+                .into_par_iter()
+                .enumerate()
+                .for_each(|(block, out)| fill(block * BLOCK, out.into()));
+        }
+        Ok(buffer)
+    }
+
+    /// Blocks until a submission has finished and a buffer it fills is mapped.
+    fn wait(
+        &self,
+        submission: wgpu::SubmissionIndex,
+        mapped: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    ) -> Result<(), String> {
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(20)),
+            })
+            .map_err(|e| e.to_string())?;
+        mapped
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
     fn run(
         &self,
+        geometry: &Geometry,
         image: &RgbImage,
-        map: &map::Map,
         dimensions: (u32, u32),
         tone: bool,
         color: bool,
@@ -155,112 +211,89 @@ impl Context {
     ) -> Result<Output, String> {
         let (width, height) = dimensions;
         let pixels = u64::from(width) * u64::from(height);
-        let source_pixels = u64::from(image.width()) * u64::from(image.height());
-        let sizes = [
-            source_pixels * 4,
-            pixels * 4,
-            (map.nodes.len() * 48) as u64,
-            (map.dense.len() * 8) as u64,
-        ];
-        if sizes
-            .into_iter()
-            .any(|n| n > self.device.limits().max_storage_buffer_binding_size)
-        {
-            return Err("GPU buffer binding limit exceeded; use CPU for this image size".into());
+        let limit = self.device.limits().max_storage_buffer_binding_size;
+        if pixels * 4 > limit || u64::from(image.width()) * u64::from(image.height()) * 4 > limit {
+            return Err("Image exceeds GPU buffer binding limit".into());
         }
         let upload_start = Instant::now();
-        let rgba: Vec<u32> = image
-            .as_raw()
-            .par_chunks_exact(3)
-            .map(|p| {
-                u32::from(p[0]) | (u32::from(p[1]) << 8) | (u32::from(p[2]) << 16) | 0xff000000
-            })
-            .collect();
         let memory_scope = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        // Written through the queue: a buffer mapped at creation is zeroed
-        // before its contents are copied in.
-        let storage = |label: &str, contents: &[u8]| {
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: contents.len() as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.queue.write_buffer(&buffer, 0, contents);
-            buffer
-        };
+        let source = self.upload("source", image.as_raw().len() / 3 * 4, |offset, out| {
+            let rgb = &image.as_raw()[offset / 4 * 3..][..out.len() / 4 * 3];
+            let (mut out, _) = out.into_chunks::<4>();
+            let mut rgba = [[0; 4]; 1024];
+            for rgb in rgb.chunks(3 * rgba.len()) {
+                let rgba = &mut rgba[..rgb.len() / 3];
+                for (rgba, rgb) in rgba.iter_mut().zip(rgb.chunks_exact(3)) {
+                    *rgba = [rgb[0], rgb[1], rgb[2], 0xff];
+                }
+                let (mut head, tail) = out.split_at(rgba.len());
+                head.copy_from_slice(rgba);
+                out = tail;
+            }
+        })?;
         let empty = |label: &str, size: u64| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
         };
-        let source = storage("source", bytemuck::cast_slice(&rgba));
-        let nodes = storage("inverse nodes", bytemuck::cast_slice(&map.nodes));
-        let roots = storage("inverse roots", bytemuck::cast_slice(&map.roots));
-        let dense = storage(
-            "exact inverse coordinates",
-            bytemuck::cast_slice(&map.dense),
-        );
         let rendered = empty("rendered RGB and luminance", pixels * 4);
         let plane = if tone { pixels * 4 } else { 4 };
         let sums = empty("horizontal luminance sums", plane);
         let squares = empty("horizontal squared luminance sums", plane);
-        let tones = empty("gray and diagnostic binary", plane);
-        let values = [
-            image.width(),
-            image.height(),
-            width,
-            height,
-            map.columns,
-            map::TILE,
-            0,
-            0,
-        ];
-        let params = self
+        let tone_bytes = u64::from(width.div_ceil(2)) * u64::from(height) * 4;
+        let tones = empty(
+            "gray and diagnostic binary",
+            if tone { tone_bytes } else { 4 },
+        );
+        // wgpu zeroes a storage buffer before the first pass that may read it.
+        // Asked for here, that and the source upload run while the map is
+        // being built.
+        let mut encoder = self
             .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("image dimensions"),
-                contents: bytemuck::cast_slice(&values),
-                usage: wgpu::BufferUsages::UNIFORM,
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Smude page buffers"),
             });
-        let buffers = [
-            &source, &nodes, &roots, &dense, &rendered, &sums, &squares, &tones, &params,
-        ];
-        let entries: Vec<_> = buffers
-            .iter()
-            .enumerate()
-            .map(|(binding, b)| wgpu::BindGroupEntry {
-                binding: binding as u32,
-                resource: b.as_entire_binding(),
-            })
-            .collect();
-        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("page buffers"),
-            layout: &self.layout,
-            entries: &entries,
-        });
-        let planes = u64::from(color) + u64::from(tone);
+        for buffer in [&rendered, &sums, &squares, &tones] {
+            encoder.clear_buffer(buffer, 0, None);
+        }
+        self.queue.submit([encoder.finish()]);
+        profile.upload_seconds = upload_start.elapsed().as_secs_f64();
+        let map_start = Instant::now();
+        let map = map::Map::new(geometry, width, height);
+        profile.map_seconds = map_start.elapsed().as_secs_f64();
+        profile.map_evaluations = map.evaluations;
+        let upload_start = Instant::now();
+        let roots = empty("inverse roots", u64::from(map.columns * map.rows) * 8);
+        let color_bytes = if color { pixels * 4 } else { 0 };
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("processed image readback"),
-            size: pixels * 4 * planes,
+            size: color_bytes + if tone { tone_bytes } else { 0 },
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let band_rows = map.rows.div_ceil(BANDS);
+        let bands = map.rows.div_ceil(band_rows);
+        // The timed passes: those of every band, then the one over the page.
+        let band_passes = 1 + u32::from(tone);
+        let passes = bands * band_passes + u32::from(tone);
         let queries = self.timestamps.then(|| {
             self.device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("image stage timestamps"),
                 ty: wgpu::QueryType::Timestamp,
-                count: 6,
+                count: 2 * passes,
             })
         });
+        let query_bytes = 16 * u64::from(passes);
         let query_resolve = queries.as_ref().map(|_| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("stage query resolution"),
-                size: 48,
+                size: query_bytes,
                 usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             })
@@ -268,19 +301,19 @@ impl Context {
         let query_readback = queries.as_ref().map(|_| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("stage query readback"),
-                size: 48,
+                size: query_bytes,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
         });
-        profile.upload_seconds = upload_start.elapsed().as_secs_f64();
-        let wait_start = Instant::now();
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Smude page"),
-            });
-        let mut pass = |pipeline: &wgpu::ComputePipeline, label: &str, index: u32| {
+        profile.upload_seconds += upload_start.elapsed().as_secs_f64();
+        // A workgroup is eight by eight invocations of `pixels` each. `index`
+        // counts the timed passes.
+        let pass = |encoder: &mut wgpu::CommandEncoder,
+                    group: &wgpu::BindGroup,
+                    (pipeline, label, pixels): (&wgpu::ComputePipeline, &str, [u32; 2]),
+                    index: u32,
+                    rows: u32| {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
                 timestamp_writes: queries.as_ref().map(|q| wgpu::ComputePassTimestampWrites {
@@ -290,49 +323,143 @@ impl Context {
                 }),
             });
             pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &group, &[]);
-            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+            pass.set_bind_group(0, group, &[]);
+            let [x, y] = pixels.map(|pixels| 8 * pixels);
+            pass.dispatch_workgroups(width.div_ceil(x), rows.div_ceil(y), 1);
         };
-        pass(&self.render, "bicubic reconstruction", 0);
-        if tone {
-            pass(&self.horizontal, "horizontal statistics", 1);
-            pass(&self.paper, "diagnostic binarization", 2);
+        let strips = |label: &str, strips: Vec<&[u8]>| {
+            let size = strips.iter().map(|strip| strip.len()).sum();
+            self.upload(label, size, |mut offset, mut out| {
+                for mut strip in strips.iter().copied() {
+                    let skipped = offset.min(strip.len());
+                    offset -= skipped;
+                    strip = &strip[skipped..];
+                    let length = strip.len().min(out.len());
+                    let (head, tail) = out.split_at(length);
+                    head.into_slice(..).copy_from_slice(&strip[..length]);
+                    out = tail;
+                }
+            })
+        };
+        let mut group = None;
+        for (index, first) in (0..).zip((0..map.rows).step_by(band_rows as usize)) {
+            let map_start = Instant::now();
+            let band = map.band(first..(first + band_rows).min(map.rows))?;
+            profile.map_seconds += map_start.elapsed().as_secs_f64();
+            profile.map_evaluations += band.evaluations;
+            profile.map_nodes += band.nodes();
+            profile.exact_map_pixels += band.dense();
+            profile.max_sampled_map_error_pixels = profile
+                .max_sampled_map_error_pixels
+                .max(band.max_probe_error);
+            if (band.nodes() * 48).max(band.dense() * 8) as u64 > limit {
+                return Err(
+                    "GPU buffer binding limit exceeded; use CPU for this image size".into(),
+                );
+            }
+            let upload_start = Instant::now();
+            let nodes = band.strips.iter().map(|s| bytemuck::cast_slice(&s.nodes));
+            let nodes = strips("inverse nodes", nodes.collect())?;
+            let dense = band.strips.iter().map(|s| bytemuck::cast_slice(&s.dense));
+            let dense = strips("exact inverse coordinates", dense.collect())?;
+            self.queue.write_buffer(
+                &roots,
+                u64::from(first * map.columns) * 8,
+                bytemuck::cast_slice(&band.roots().collect::<Vec<_>>()),
+            );
+            let first = first * map::TILE;
+            let values = [
+                image.width(),
+                image.height(),
+                width,
+                height,
+                map.columns,
+                map::TILE,
+                RUN,
+                first,
+            ];
+            let params = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("image dimensions"),
+                    contents: bytemuck::cast_slice(&values),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let buffers = [
+                &source, &nodes, &roots, &dense, &rendered, &sums, &squares, &tones, &params,
+            ];
+            let entries: Vec<_> = buffers
+                .iter()
+                .enumerate()
+                .map(|(binding, b)| wgpu::BindGroupEntry {
+                    binding: binding as u32,
+                    resource: b.as_entire_binding(),
+                })
+                .collect();
+            let group = group.insert(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("band buffers"),
+                layout: &self.layout,
+                entries: &entries,
+            }));
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Smude band"),
+                });
+            let rows = (first + band_rows * map::TILE).min(height) - first;
+            let index = index * band_passes;
+            let stage = (&self.render, "bicubic reconstruction", [1, 1]);
+            pass(&mut encoder, group, stage, index, rows);
+            if tone {
+                let stage = (&self.horizontal, "horizontal statistics", [RUN, 1]);
+                pass(&mut encoder, group, stage, index + 1, rows);
+            }
+            self.queue.submit([encoder.finish()]);
+            profile.upload_seconds += upload_start.elapsed().as_secs_f64();
         }
-        let mut offset = 0;
+        let wait_start = Instant::now();
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Smude page"),
+            });
+        if let (true, Some(group)) = (tone, &group) {
+            let stage = (&self.paper, "diagnostic binarization", [2, RUN]);
+            pass(&mut encoder, group, stage, passes - 1, height);
+        }
         if color {
-            encoder.copy_buffer_to_buffer(&rendered, 0, &readback, offset, pixels * 4);
-            offset += pixels * 4;
+            encoder.copy_buffer_to_buffer(&rendered, 0, &readback, 0, color_bytes);
         }
         if tone {
-            encoder.copy_buffer_to_buffer(&tones, 0, &readback, offset, pixels * 4);
-        }
-        if let (Some(queries), Some(resolve), Some(read)) =
-            (&queries, &query_resolve, &query_readback)
-        {
-            encoder.resolve_query_set(queries, 0..if tone { 6 } else { 2 }, resolve, 0);
-            encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 48);
+            encoder.copy_buffer_to_buffer(&tones, 0, &readback, color_bytes, tone_bytes);
         }
         let submission = self.queue.submit([encoder.finish()]);
         let (sender, receiver) = mpsc::sync_channel(1);
         readback.map_async(wgpu::MapMode::Read, .., move |r| {
             let _ = sender.send(r);
         });
-        let (q_sender, q_receiver) = mpsc::sync_channel(1);
-        if let Some(read) = &query_readback {
+        self.wait(submission, receiver)?;
+        // Metal only reports the timestamps of passes that have finished by
+        // the time they are resolved. Their readback overlaps the unpacking.
+        let timestamps = if let (Some(queries), Some(resolve), Some(read)) =
+            (&queries, &query_resolve, &query_readback)
+        {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Smude stage timestamps"),
+                });
+            encoder.resolve_query_set(queries, 0..2 * passes, resolve, 0);
+            encoder.copy_buffer_to_buffer(resolve, 0, read, 0, query_bytes);
+            let submission = self.queue.submit([encoder.finish()]);
+            let (sender, receiver) = mpsc::sync_channel(1);
             read.map_async(wgpu::MapMode::Read, .., move |r| {
-                let _ = q_sender.send(r);
+                let _ = sender.send(r);
             });
-        }
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(Duration::from_secs(20)),
-            })
-            .map_err(|e| e.to_string())?;
-        receiver
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
+            Some((read, submission, receiver))
+        } else {
+            None
+        };
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(error.to_string());
         }
@@ -340,26 +467,6 @@ impl Context {
             return Err(error.to_string());
         }
         profile.gpu_wait_readback_seconds = wait_start.elapsed().as_secs_f64();
-        if let Some(read) = &query_readback {
-            q_receiver
-                .recv_timeout(Duration::from_secs(2))
-                .map_err(|e| e.to_string())?
-                .map_err(|e| e.to_string())?;
-            let bytes = read.get_mapped_range(..).map_err(|e| e.to_string())?;
-            let ticks: &[u64] = bytemuck::cast_slice(&bytes);
-            let duration = |i: usize| {
-                ticks[i + 1].saturating_sub(ticks[i]) as f64
-                    * f64::from(self.queue.get_timestamp_period())
-                    / 1e9
-            };
-            profile.gpu_render_seconds = Some(duration(0));
-            if tone {
-                profile.gpu_horizontal_seconds = Some(duration(2));
-                profile.gpu_paper_seconds = Some(duration(4));
-            }
-            drop(bytes);
-            read.unmap();
-        }
         let unpack_start = Instant::now();
         let mapped = readback.get_mapped_range(..).map_err(|e| e.to_string())?;
         // Vulkan readback allocations on Android may be uncached. Copy once
@@ -385,16 +492,15 @@ impl Context {
             None
         };
         let tone_images = if tone {
-            let bytes = &bytes[if color { pixels as usize * 4 } else { 0 }..];
             let (mut gray, mut binary) = (vec![0; pixels as usize], vec![0; pixels as usize]);
-            gray.par_chunks_mut(4096)
-                .zip(binary.par_chunks_mut(4096))
-                .enumerate()
-                .for_each(|(block, (g, b))| {
-                    for j in 0..g.len() {
-                        let i = (block * 4096 + j) * 4;
-                        g[j] = bytes[i];
-                        b[j] = bytes[i + 1];
+            gray.par_chunks_mut(width as usize)
+                .zip(binary.par_chunks_mut(width as usize))
+                .zip(bytes[color_bytes as usize..].par_chunks(width.div_ceil(2) as usize * 4))
+                .for_each(|((gray, binary), row)| {
+                    for ((gray, binary), tones) in
+                        gray.iter_mut().zip(binary).zip(row.chunks_exact(2))
+                    {
+                        (*gray, *binary) = (tones[0], tones[1]);
                     }
                 });
             Some((
@@ -407,6 +513,31 @@ impl Context {
         drop(mapped);
         readback.unmap();
         profile.unpack_seconds = unpack_start.elapsed().as_secs_f64();
+        if let Some((read, submission, receiver)) = timestamps {
+            let wait_start = Instant::now();
+            self.wait(submission, receiver)?;
+            profile.gpu_wait_readback_seconds += wait_start.elapsed().as_secs_f64();
+            let bytes = read.get_mapped_range(..).map_err(|e| e.to_string())?;
+            let ticks: &[u64] = bytemuck::cast_slice(&bytes);
+            let duration = |pass: u32| {
+                let ticks = &ticks[2 * pass as usize..];
+                ticks[1].saturating_sub(ticks[0]) as f64
+                    * f64::from(self.queue.get_timestamp_period())
+                    / 1e9
+            };
+            let stage = |pass: u32| -> f64 {
+                (0..bands)
+                    .map(|band| duration(band * band_passes + pass))
+                    .sum()
+            };
+            profile.gpu_render_seconds = Some(stage(0));
+            if tone {
+                profile.gpu_horizontal_seconds = Some(stage(1));
+                profile.gpu_paper_seconds = Some(duration(passes - 1));
+            }
+            drop(bytes);
+            read.unmap();
+        }
         profile.adapter = Some(self.adapter.clone());
         Ok(Output {
             color: color_image,
@@ -430,7 +561,7 @@ pub(crate) fn render(
         .get_or_init(|| Context::new().map(Mutex::new))
         .as_ref()
         .map_err(Clone::clone)?;
-    let mut profile = RenderProfile {
+    let profile = RenderProfile {
         backend: "gpu".into(),
         initialization_seconds: if initialized {
             0.
@@ -439,26 +570,8 @@ pub(crate) fn render(
         },
         ..RenderProfile::default()
     };
-    let limit = context
-        .lock()
-        .map_err(|_| "GPU context lock poisoned".to_string())?
-        .device
-        .limits()
-        .max_storage_buffer_binding_size;
-    if u64::from(width) * u64::from(height) * 4 > limit
-        || u64::from(image.width()) * u64::from(image.height()) * 4 > limit
-    {
-        return Err("Image exceeds GPU buffer binding limit".into());
-    }
-    let start = Instant::now();
-    let map = map::Map::build(geometry, width, height)?;
-    profile.map_seconds = start.elapsed().as_secs_f64();
-    profile.map_evaluations = map.evaluations;
-    profile.map_nodes = map.nodes.len();
-    profile.exact_map_pixels = map.dense.len();
-    profile.max_sampled_map_error_pixels = map.max_probe_error;
     context
         .lock()
         .map_err(|_| "GPU context lock poisoned".to_string())?
-        .run(image, &map, (width, height), tone, color, profile)
+        .run(geometry, image, (width, height), tone, color, profile)
 }

@@ -13,3 +13,20 @@ pub(crate) fn map<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> U + Sync + Se
         items.iter().map(f).collect()
     }
 }
+
+/// `items.into_iter().map(f).collect()`, in the same order, for items that
+/// are handed over to the threads.
+pub(crate) fn map_owned<T: Send, U: Send>(
+    items: Vec<T>,
+    f: impl Fn(T) -> U + Sync + Send,
+) -> Vec<U> {
+    #[cfg(feature = "render")]
+    {
+        use rayon::prelude::*;
+        items.into_par_iter().map(f).collect()
+    }
+    #[cfg(not(feature = "render"))]
+    {
+        items.into_iter().map(f).collect()
+    }
+}

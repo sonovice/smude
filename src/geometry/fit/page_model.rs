@@ -170,7 +170,10 @@ impl Geometry {
             geometry.report.input_width = data.width;
             geometry.report.input_height = data.height;
             geometry.report.staff_edges = edges.to_vec();
+            profile.failure_stage = Some("page_composed_validation");
+            let stage = Instant::now();
             geometry.validate(data)?;
+            profile.map_validation_seconds += stage.elapsed().as_secs_f64();
             Ok(geometry)
         })();
         profile.total_seconds = started.elapsed().as_secs_f64();

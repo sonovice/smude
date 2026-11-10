@@ -60,42 +60,81 @@ impl Default for DirectionMesh {
     }
 }
 
-/// Clamped cardinal cubic weights and physical derivatives. Repeated end
-/// controls extend the field constantly outside the supported rectangle.
-fn basis<const K: usize>(p: f64, lo: f64, hi: f64) -> ([f64; K], [f64; K]) {
-    let h = (hi - lo) / (K - 1) as f64;
-    let t = ((p - lo) / h).clamp(0., (K - 1) as f64);
-    let i = t.floor() as isize;
-    let f = t - i as f64;
-    let w = [
-        (1. - f).powi(3) / 6.,
-        (3. * f.powi(3) - 6. * f * f + 4.) / 6.,
-        (-3. * f.powi(3) + 3. * f * f + 3. * f + 1.) / 6.,
-        f.powi(3) / 6.,
-    ];
-    let d = [
-        -0.5 * (1. - f).powi(2),
-        1.5 * f * f - 2. * f,
-        -1.5 * f * f + f + 0.5,
-        0.5 * f * f,
-    ];
-    let mut a = [0.; K];
-    let mut b = [0.; K];
-    for k in 0..4 {
-        let j = (i + k as isize - 1).clamp(0, (K - 1) as isize) as usize;
-        a[j] += w[k];
-        if p >= lo && p <= hi {
-            b[j] += d[k] / h;
+/// Where a coordinate falls among `K` clamped cardinal cubic controls.
+/// Repeated end controls extend the field constantly outside the supported
+/// rectangle.
+struct Cell<const K: usize> {
+    index: usize,
+    fraction: f64,
+    width: f64,
+    inside: bool,
+}
+impl<const K: usize> Cell<K> {
+    fn at(p: f64, lo: f64, hi: f64) -> Self {
+        let width = (hi - lo) / (K - 1) as f64;
+        let t = ((p - lo) / width).clamp(0., (K - 1) as f64);
+        let index = t.floor() as usize;
+        Self {
+            index,
+            fraction: t - index as f64,
+            width,
+            inside: p >= lo && p <= hi,
         }
     }
-    (a, b)
-}
-
-/// Inclusive index range holding every non-zero weight of [`basis`].
-fn support<const K: usize>(p: f64, lo: f64, hi: f64) -> (usize, usize) {
-    let h = (hi - lo) / (K - 1) as f64;
-    let i = ((p - lo) / h).clamp(0., (K - 1) as f64).floor() as usize;
-    (i.saturating_sub(1), (i + 2).min(K - 1))
+    /// The first control this cell's spline pieces reach.
+    fn first(&self) -> usize {
+        self.index.saturating_sub(1)
+    }
+    /// How many controls from `first` on they reach.
+    fn len(&self) -> usize {
+        (self.index + 2).min(K - 1) - self.first() + 1
+    }
+    /// The four spline pieces summed onto the controls from `first` on. A
+    /// clamped end control collects every piece beyond it.
+    fn fold(&self, pieces: [f64; 4]) -> [f64; 4] {
+        let reached: [usize; 4] =
+            std::array::from_fn(|k| (self.index + k).saturating_sub(1).min(K - 1) - self.first());
+        // Selected rather than indexed: a sum through a computed slot waits
+        // for the store before it. The zeros added instead change no sum.
+        std::array::from_fn(|slot| {
+            let mut sum = 0.;
+            for (piece, reached) in pieces.iter().zip(reached) {
+                sum += if reached == slot { *piece } else { 0. };
+            }
+            sum
+        })
+    }
+    fn weights(&self) -> [f64; 4] {
+        let f = self.fraction;
+        self.fold([
+            (1. - f).powi(3) / 6.,
+            (3. * f.powi(3) - 6. * f * f + 4.) / 6.,
+            (-3. * f.powi(3) + 3. * f * f + 3. * f + 1.) / 6.,
+            f.powi(3) / 6.,
+        ])
+    }
+    /// Physical derivatives of `weights`.
+    fn slopes(&self) -> [f64; 4] {
+        if !self.inside {
+            return [0.; 4];
+        }
+        let f = self.fraction;
+        self.fold(
+            [
+                -0.5 * (1. - f).powi(2),
+                1.5 * f * f - 2. * f,
+                -1.5 * f * f + f + 0.5,
+                0.5 * f * f,
+            ]
+            .map(|d| d / self.width),
+        )
+    }
+    /// `folded` over all `K` controls; those out of reach weigh nothing.
+    fn dense(&self, folded: [f64; 4]) -> [f64; K] {
+        let mut dense = [0.; K];
+        dense[self.first()..][..self.len()].copy_from_slice(&folded[..self.len()]);
+        dense
+    }
 }
 
 #[derive(Clone)]
@@ -128,7 +167,7 @@ impl MeshRow {
     /// single dependency chain, so a few samples are stepped side by side;
     /// each takes exactly the steps it would take alone.
     pub fn inverse_xs(&self, xs: &mut [f64]) {
-        const LANES: usize = 4;
+        const LANES: usize = 8;
         for xs in xs.chunks_mut(LANES) {
             let mut q = [0.; LANES];
             let mut active = [false; LANES];
@@ -138,14 +177,16 @@ impl MeshRow {
             }
             // The certified derivative bound is positive over the entire
             // field, including the constant extension; Newton has no
-            // alternative root.
+            // alternative root. Convergence is quadratic, so a step below a
+            // thousandth of a pixel leaves an error far below anything a
+            // resampled pixel can show.
             for _ in 0..10 {
                 for ((q, active), x) in q.iter_mut().zip(&mut active).zip(xs.iter()) {
                     let (u, dx) = self.displacement(*q);
                     let step = (*q + u - x) / (1. + dx);
                     if *active {
                         *q -= step;
-                        *active = step.abs() >= 1e-9 || step.is_nan();
+                        *active = step.abs() >= 1e-3 || step.is_nan();
                     }
                 }
                 if !active.contains(&true) {
@@ -157,23 +198,29 @@ impl MeshRow {
     }
 }
 impl DirectionMesh {
-    fn weights(&self, p: Point, derivative: bool) -> [f64; N] {
-        let (x, dx) = basis::<NX>(p.x, self.bounds[0], self.bounds[2]);
-        let (y, _) = basis::<NY>(p.y, self.bounds[1], self.bounds[3]);
-        std::array::from_fn(|i| if derivative { dx[i % NX] } else { x[i % NX] } * y[i / NX])
+    fn cells(&self, p: Point) -> (Cell<NX>, Cell<NY>) {
+        (
+            Cell::at(p.x, self.bounds[0], self.bounds[2]),
+            Cell::at(p.y, self.bounds[1], self.bounds[3]),
+        )
     }
-    /// `weights(p, derivative) · controls` over the 4x4 support only. Terms are
-    /// visited in dense order, so the sum equals the dense product exactly.
+    fn weights(&self, p: Point, derivative: bool) -> [f64; N] {
+        let (x, y) = self.cells(p);
+        let x = x.dense(if derivative { x.slopes() } else { x.weights() });
+        let y = y.dense(y.weights());
+        std::array::from_fn(|i| x[i % NX] * y[i / NX])
+    }
+    /// `weights(p, derivative) · controls` over the controls in reach only.
+    /// Terms are visited in dense order, so the sum equals the dense product
+    /// exactly.
     fn dot(&self, p: Point, derivative: bool) -> f64 {
-        let (value, slope) = basis::<NX>(p.x, self.bounds[0], self.bounds[2]);
-        let x = if derivative { slope } else { value };
-        let (y, _) = basis::<NY>(p.y, self.bounds[1], self.bounds[3]);
-        let (x0, x1) = support::<NX>(p.x, self.bounds[0], self.bounds[2]);
-        let (y0, y1) = support::<NY>(p.y, self.bounds[1], self.bounds[3]);
+        let (x, y) = self.cells(p);
+        let across = if derivative { x.slopes() } else { x.weights() };
+        let rows = self.controls.chunks_exact(NX).skip(y.first());
         let mut sum = 0.;
-        for (j, y) in y.iter().enumerate().take(y1 + 1).skip(y0) {
-            for (i, x) in x.iter().enumerate().take(x1 + 1).skip(x0) {
-                sum += x * y * self.controls[j * NX + i];
+        for (y, row) in y.weights().iter().zip(rows).take(y.len()) {
+            for (x, control) in across.iter().zip(&row[x.first()..]).take(x.len()) {
+                sum += x * y * control;
             }
         }
         sum
@@ -194,7 +241,8 @@ impl DirectionMesh {
         if self.report.accepted_scale == 0. {
             return None;
         }
-        let (w, _) = basis::<NY>(y, self.bounds[1], self.bounds[3]);
+        let cell = Cell::<NY>::at(y, self.bounds[1], self.bounds[3]);
+        let w = cell.dense(cell.weights());
         let controls: [f64; NX] =
             std::array::from_fn(|x| (0..NY).map(|y| w[y] * self.controls[y * NX + x]).sum());
         let polynomials = std::array::from_fn(|i| {
@@ -708,4 +756,92 @@ fn solve(mut a: [[f64; N]; N], mut b: [f64; N]) -> Option<[f64; N]> {
         x[i] = (b[i] - (i + 1..N).map(|j| a[i][j] * x[j]).sum::<f64>()) / a[i][i];
     }
     Some(x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dense definition of the clamped basis.
+    fn basis<const K: usize>(p: f64, lo: f64, hi: f64) -> ([f64; K], [f64; K]) {
+        let h = (hi - lo) / (K - 1) as f64;
+        let t = ((p - lo) / h).clamp(0., (K - 1) as f64);
+        let i = t.floor() as isize;
+        let f = t - i as f64;
+        let w = [
+            (1. - f).powi(3) / 6.,
+            (3. * f.powi(3) - 6. * f * f + 4.) / 6.,
+            (-3. * f.powi(3) + 3. * f * f + 3. * f + 1.) / 6.,
+            f.powi(3) / 6.,
+        ];
+        let d = [
+            -0.5 * (1. - f).powi(2),
+            1.5 * f * f - 2. * f,
+            -1.5 * f * f + f + 0.5,
+            0.5 * f * f,
+        ];
+        let mut a = [0.; K];
+        let mut b = [0.; K];
+        for k in 0..4 {
+            let j = (i + k as isize - 1).clamp(0, (K - 1) as isize) as usize;
+            a[j] += w[k];
+            if p >= lo && p <= hi {
+                b[j] += d[k] / h;
+            }
+        }
+        (a, b)
+    }
+
+    /// Coordinates in every cell, on every knot, at and beyond both ends.
+    fn coordinates(lo: f64, hi: f64, cells: usize) -> Vec<f64> {
+        let step = (hi - lo) / (8 * cells) as f64;
+        (-9..=8 * cells as i32 + 9)
+            .map(|i| lo + f64::from(i) * step)
+            .chain([lo, hi, f64::NAN, f64::INFINITY, f64::NEG_INFINITY])
+            .collect()
+    }
+
+    fn bits<const K: usize>(values: [f64; K]) -> [u64; K] {
+        values.map(f64::to_bits)
+    }
+
+    #[test]
+    fn cell_weights_are_the_dense_basis() {
+        fn check<const K: usize>(lo: f64, hi: f64) {
+            for p in coordinates(lo, hi, K - 1) {
+                let cell = Cell::<K>::at(p, lo, hi);
+                let (weights, slopes) = basis::<K>(p, lo, hi);
+                assert_eq!(bits(cell.dense(cell.weights())), bits(weights), "{p}");
+                assert_eq!(bits(cell.dense(cell.slopes())), bits(slopes), "{p}");
+            }
+        }
+        check::<NX>(-37.5, 2811.25);
+        check::<NY>(12.75, 4001.);
+    }
+
+    #[test]
+    fn dot_is_the_dense_product() {
+        let bounds = [-37.5, 12.75, 2811.25, 4001.];
+        let mut mesh = DirectionMesh {
+            bounds,
+            ..DirectionMesh::default()
+        };
+        for (k, control) in mesh.controls.iter_mut().enumerate() {
+            *control = (0.37 * k as f64).sin() * 40. + (k % 7) as f64;
+        }
+        for y in coordinates(bounds[1], bounds[3], NY - 1) {
+            for x in coordinates(bounds[0], bounds[2], NX - 1) {
+                let p = Point { x, y };
+                for derivative in [false, true] {
+                    let dense = mesh
+                        .weights(p, derivative)
+                        .iter()
+                        .zip(&mesh.controls)
+                        .fold(0., |sum, (weight, control)| sum + weight * control);
+                    let sparse = mesh.dot(p, derivative);
+                    assert_eq!(sparse.to_bits(), dense.to_bits(), "{p:?} {derivative}");
+                }
+            }
+        }
+    }
 }

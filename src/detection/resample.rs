@@ -43,29 +43,44 @@ fn taps(source: usize, target: usize) -> Vec<Taps> {
         .collect()
 }
 
+/// A window of interleaved samples set into a canvas whose remaining pixels
+/// replicate the window's edges.
+struct Canvas<'a> {
+    /// The samples from the window's first on.
+    samples: &'a [u8],
+    /// Samples from one row of the window to the next.
+    stride: usize,
+    /// Width and height of the window in pixels.
+    window: [usize; 2],
+    /// Canvas columns left of the window and canvas rows above it.
+    offset: [usize; 2],
+    /// Width of the canvas in pixels.
+    width: usize,
+}
+
 /// Rows first, then columns, summing in `f32` in tap order: the order that
 /// fixes every rounding of the reference.
-fn resample<const C: usize>(
-    source: &[u8],
-    width: usize,
-    columns: &[Taps],
-    rows: &[Taps],
-) -> Vec<u8> {
+fn resample<const C: usize>(canvas: &Canvas, columns: &[Taps], rows: &[Taps]) -> Vec<u8> {
+    let [w, h] = canvas.window;
+    let [left, top] = canvas.offset;
     let mut target = vec![0; columns.len() * rows.len() * C];
     target
         .par_chunks_exact_mut(columns.len() * C)
         .zip(rows)
         .for_each_init(
-            || vec![0_f32; width * C],
+            || vec![[0_f32; C]; canvas.width],
             |blend, (target, (first, weights))| {
-                blend.fill(0.);
-                let rows = source[first * width * C..].chunks_exact(width * C);
-                for (row, weight) in rows.zip(weights) {
-                    for (sum, sample) in blend.iter_mut().zip(row) {
+                let window = blend[left..left + w].as_flattened_mut();
+                window.fill(0.);
+                for (y, weight) in (*first..).zip(weights) {
+                    let row = y.saturating_sub(top).min(h - 1) * canvas.stride;
+                    for (sum, sample) in window.iter_mut().zip(&canvas.samples[row..][..w * C]) {
                         *sum += f32::from(*sample) * weight;
                     }
                 }
-                let (blend, _) = blend.as_chunks::<C>();
+                let (leftmost, rightmost) = (blend[left], blend[left + w - 1]);
+                blend[..left].fill(leftmost);
+                blend[left + w..].fill(rightmost);
                 let (target, _) = target.as_chunks_mut::<C>();
                 for (target, (first, weights)) in target.iter_mut().zip(columns) {
                     let mut sum = [0_f32; C];
@@ -93,18 +108,53 @@ pub(crate) fn resize_triangle<P: Pixel<Subpixel = u8>>(
     if image.is_empty() || width == 0 || height == 0 {
         return ImageBuffer::new(width, height);
     }
-    let source = image.as_raw();
-    let from = image.width() as usize;
-    let columns = taps(from, width as usize);
-    let rows = taps(image.height() as usize, height as usize);
+    let window = [image.width() as usize, image.height() as usize];
+    let canvas = Canvas {
+        samples: image.as_raw(),
+        stride: window[0] * usize::from(P::CHANNEL_COUNT),
+        window,
+        offset: [0, 0],
+        width: window[0],
+    };
+    let columns = taps(window[0], width as usize);
+    let rows = taps(window[1], height as usize);
     let samples = match P::CHANNEL_COUNT {
-        1 => resample::<1>(source, from, &columns, &rows),
-        2 => resample::<2>(source, from, &columns, &rows),
-        3 => resample::<3>(source, from, &columns, &rows),
-        4 => resample::<4>(source, from, &columns, &rows),
+        1 => resample::<1>(&canvas, &columns, &rows),
+        2 => resample::<2>(&canvas, &columns, &rows),
+        3 => resample::<3>(&canvas, &columns, &rows),
+        4 => resample::<4>(&canvas, &columns, &rows),
         count => unreachable!("{count} channels in an image pixel"),
     };
     ImageBuffer::from_raw(width, height, samples).expect("one sample per target channel")
+}
+
+/// `resize_triangle` of the non-empty `view` (`[x, y, width, height]`) of the
+/// image, set at `offset` into a canvas of the given `size` whose remaining
+/// pixels replicate the view's edges. Neither the view nor the canvas is
+/// copied at source resolution.
+#[cfg(feature = "onnx-pages")]
+pub(crate) fn resize_triangle_padded(
+    image: &RgbImage,
+    view: [u32; 4],
+    size: [u32; 2],
+    offset: [u32; 2],
+    width: u32,
+    height: u32,
+) -> RgbImage {
+    let [x, y, w, h] = view.map(|v| v as usize);
+    let [canvas_width, canvas_height] = size.map(|v| v as usize);
+    let stride = image.width() as usize * 3;
+    let canvas = Canvas {
+        samples: &image.as_raw()[y * stride + x * 3..],
+        stride,
+        window: [w, h],
+        offset: offset.map(|v| v as usize),
+        width: canvas_width,
+    };
+    let columns = taps(canvas_width, width as usize);
+    let rows = taps(canvas_height, height as usize);
+    let samples = resample::<3>(&canvas, &columns, &rows);
+    RgbImage::from_raw(width, height, samples).expect("one sample per target channel")
 }
 
 #[cfg(test)]
@@ -150,6 +200,33 @@ mod tests {
                 resize_triangle(&color, width, height),
                 resize(&color, width, height, FilterType::Triangle),
                 "color {width}x{height}"
+            );
+        }
+    }
+
+    #[cfg(feature = "onnx-pages")]
+    #[test]
+    fn padded_resize_equals_the_resize_of_the_materialized_canvas() {
+        let image = RgbImage::from_raw(97, 61, noise(97 * 61 * 3)).unwrap();
+        // Margins on either axis, a canvas that is the view, both scale directions.
+        for (view, size, offset, width, height) in [
+            ([43, 5, 54, 50], [54, 72], [0, 11], 12, 16),
+            ([0, 0, 30, 61], [45, 61], [7, 0], 12, 16),
+            ([10, 20, 7, 9], [13, 14], [2, 3], 40, 30),
+            ([3, 2, 12, 16], [12, 16], [0, 0], 12, 16),
+            ([0, 0, 97, 61], [97, 61], [0, 0], 144, 192),
+        ] {
+            let [x, y, w, h] = view;
+            let canvas = RgbImage::from_fn(size[0], size[1], |column, row| {
+                *image.get_pixel(
+                    x + column.saturating_sub(offset[0]).min(w - 1),
+                    y + row.saturating_sub(offset[1]).min(h - 1),
+                )
+            });
+            assert_eq!(
+                resize_triangle_padded(&image, view, size, offset, width, height),
+                resize(&canvas, width, height, FilterType::Triangle),
+                "view {view:?} in {size:?} to {width}x{height}"
             );
         }
     }

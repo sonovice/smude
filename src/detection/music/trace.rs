@@ -3,10 +3,12 @@
 //! uniform dark page edges do not provide five separate ink ridges.
 use super::{Ink, smooth};
 use crate::geometry::Staff;
-use crate::math::median;
+use crate::math::{median, median_in_place};
+use rayon::prelude::*;
 
-/// Masked ink and its vertical three-pixel maximum as byte planes: tracing
-/// probes these two neighbourhoods millions of times per page.
+/// Masked ink and its vertical three-pixel maximum as byte planes, stored by
+/// columns: tracing probes short vertical runs of these two neighbourhoods
+/// millions of times per page.
 pub(super) struct Planes<'a> {
     ink: &'a Ink,
     own: Vec<bool>,
@@ -15,26 +17,32 @@ pub(super) struct Planes<'a> {
 
 impl<'a> Planes<'a> {
     pub(super) fn new(ink: &'a Ink) -> Self {
-        let own: Vec<bool> = match &ink.allowed {
-            Some(mask) => ink
-                .pixels
-                .iter()
-                .zip(mask)
-                .map(|(value, inside)| *inside && *value > 0.)
-                .collect(),
-            None => ink.pixels.iter().map(|value| *value > 0.).collect(),
-        };
-        let mut tall = own.clone();
-        for (y, row) in tall.chunks_exact_mut(ink.w).enumerate() {
-            for neighbour in [y.wrapping_sub(1), y + 1] {
-                if neighbour < ink.h {
-                    let source = &own[neighbour * ink.w..(neighbour + 1) * ink.w];
-                    for (value, other) in row.iter_mut().zip(source) {
-                        *value |= *other;
+        // Transposed in tiles of columns that share a cache line of every row.
+        const TILE: usize = 64;
+        let (w, h) = (ink.w, ink.h);
+        let mut own = vec![false; w * h];
+        own.par_chunks_mut((TILE * h).max(1))
+            .enumerate()
+            .for_each(|(tile, columns)| {
+                for y in 0..h {
+                    let row = y * w + tile * TILE;
+                    for (x, column) in columns.chunks_exact_mut(h).enumerate() {
+                        column[y] = ink.pixels[row + x] > 0.
+                            && ink.allowed.as_ref().is_none_or(|mask| mask[row + x]);
                     }
                 }
-            }
-        }
+            });
+        let mut tall = own.clone();
+        tall.par_chunks_mut(h.max(1))
+            .zip(own.par_chunks(h.max(1)))
+            .for_each(|(tall, own)| {
+                for (value, above) in tall[1..].iter_mut().zip(own) {
+                    *value |= *above;
+                }
+                for (value, below) in tall.iter_mut().zip(&own[1..]) {
+                    *value |= *below;
+                }
+            });
         Self { ink, own, tall }
     }
 
@@ -50,7 +58,13 @@ impl<'a> Planes<'a> {
 
     fn inked(&self, column: usize, y: f64) -> bool {
         self.row(y)
-            .is_some_and(|row| self.own[row * self.ink.w + column])
+            .is_some_and(|row| self.own[column * self.ink.h + row])
+    }
+
+    /// `inked` at a whole row.
+    fn marked(&self, column: usize, row: i32) -> bool {
+        usize::try_from(row)
+            .is_ok_and(|row| row < self.ink.h && self.own[column * self.ink.h + row])
     }
 
     /// Whether any of `y - 1.`, `y` and `y + 1.` is inked.
@@ -62,22 +76,34 @@ impl<'a> Planes<'a> {
             && (y + 1.).round() == row + 1.
             && let Some(row) = self.row(y)
         {
-            self.tall[row * self.ink.w + column]
+            self.tall[column * self.ink.h + row]
         } else {
             [-1., 0., 1.].iter().any(|dy| self.inked(column, y + dy))
         }
     }
 
-    /// `Ink::at`, for ink that is exactly 0 or 1.
-    fn at(&self, x: f64, y: f64) -> f64 {
-        let inked = self.column(x).is_some_and(|column| self.inked(column, y));
-        f64::from(u8::from(inked))
-    }
-
-    /// The largest of `at(x, y - 1.)`, `at(x, y)` and `at(x, y + 1.)`.
+    /// The largest masked ink of `Ink::at` at `y - 1.`, `y` and `y + 1.`.
     fn ridge(&self, x: f64, y: f64) -> f64 {
         let ridged = self.column(x).is_some_and(|column| self.ridged(column, y));
         f64::from(u8::from(ridged))
+    }
+}
+
+/// How many candidates one pixel apart a comb tallies at once.
+const LANES: usize = 16;
+
+/// Up to `LANES` heights one pixel apart: `h + dy` for the `len` offsets `dy`
+/// from `first`.
+#[derive(Clone, Copy)]
+struct Lanes {
+    h: f64,
+    first: i32,
+    len: usize,
+}
+
+impl Lanes {
+    fn offsets(self) -> impl Iterator<Item = i32> {
+        (self.first..).take(self.len)
     }
 }
 
@@ -111,6 +137,56 @@ impl<'a> Comb<'a> {
     fn ink(&self, y: f64, m: f64) -> f64 {
         self.count(y, m, |column, y| self.planes.inked(column, y))
     }
+
+    /// `count` on the lines through `lanes.h + dy + rise` for every offset
+    /// `dy` of `lanes` at once, the unused lanes holding anything. `plane`
+    /// holds what `inked` answers for a row away from its rounding boundaries.
+    fn tally(
+        &self,
+        lanes: Lanes,
+        rise: f64,
+        m: f64,
+        plane: &[bool],
+        inked: impl Fn(usize, f64) -> bool,
+    ) -> [u8; LANES] {
+        let h = self.planes.ink.h;
+        let mut tally = [0; LANES];
+        for (dx, column) in self.columns {
+            let Some(column) = column else {
+                continue;
+            };
+            let lift = m * dx;
+            let y = (lanes.h + rise) + lift;
+            let start = y.round() + f64::from(lanes.first);
+            // The lanes round one row apart unless `y` lies on a rounding
+            // boundary: these three-term sums of raster coordinates are exact
+            // to far less than the margin.
+            let aligned = (y - y.round()).abs() < 0.5 - 1e-6;
+            if aligned && start >= 0. && start + LANES as f64 <= h as f64 {
+                let rows = &plane[column * h + start as usize..][..LANES];
+                for (count, inked) in tally.iter_mut().zip(rows) {
+                    *count += u8::from(*inked);
+                }
+            } else {
+                for (count, dy) in tally.iter_mut().zip(lanes.offsets()) {
+                    *count += u8::from(inked(column, ((lanes.h + f64::from(dy)) + rise) + lift));
+                }
+            }
+        }
+        tally
+    }
+
+    /// `ridges` for every lane.
+    fn ridge_tally(&self, lanes: Lanes, rise: f64, m: f64) -> [u8; LANES] {
+        let ridged = |column, y| self.planes.ridged(column, y);
+        self.tally(lanes, rise, m, &self.planes.tall, ridged)
+    }
+
+    /// `ink` for every lane.
+    fn ink_tally(&self, lanes: Lanes, rise: f64, m: f64) -> [u8; LANES] {
+        let inked = |column, y| self.planes.inked(column, y);
+        self.tally(lanes, rise, m, &self.planes.own, inked)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -125,57 +201,42 @@ fn permitted(ink: &Ink, state: State) -> bool {
     (-2..=2).all(|k| ink.permits(state.x, state.h + f64::from(k) * state.d))
 }
 
-/// Five-line evidence on the comb at `state.x`: mean ridge support less the
-/// densest interline ink. `None` unless three lines are strong, the mean reaches 0.58 and the
-/// result is `viable`. That predicate must not accept a value after rejecting a
-/// larger one: reading stops once even full support on the unread lines, or
-/// the interline ink already seen, rules the result out.
-fn viable_evidence(comb: &Comb, state: State, viable: impl Fn(f64) -> bool) -> Option<f64> {
-    let supported = |strong: i32, mean: f64| strong >= 3 && mean >= 0.58 && viable(mean);
+/// Mean ridge support of five lines from the comb count of each; `None`
+/// unless three lines are strong and the mean reaches 0.58.
+fn foreground(ridges: [f64; 5]) -> Option<f64> {
     let mut foreground = 0.;
     let mut strong = 0;
-    for k in -2..=2 {
-        let unread = 3 - k;
-        let reachable = (0..unread).fold(foreground, |mean, _| mean + 1. / 5.);
-        if !supported(strong + unread, reachable) {
-            return None;
-        }
-        let sum = comb.ridges(state.h + f64::from(k) * state.d, state.m) / 5.;
+    for count in ridges {
+        let sum = count / 5.;
         foreground += sum / 5.;
         if sum >= 0.6 {
             strong += 1;
         }
     }
-    if !supported(strong, foreground) {
-        return None;
-    }
-    let mut background = 0_f64;
-    for fraction in [1. / 3., 0.5, 2. / 3.] {
-        let between = (-2..2)
-            .map(|k| comb.ink(state.h + (f64::from(k) + fraction) * state.d, state.m))
-            .sum::<f64>()
-            / 20.;
-        background = background.max(between);
-        if !viable(foreground - 0.8 * background) {
-            return None;
-        }
-    }
-    Some(foreground - 0.8 * background)
+    (strong >= 3 && foreground >= 0.58).then_some(foreground)
 }
 
+/// The interline positions whose ink speaks against a staff.
+const BETWEEN: [f64; 3] = [1. / 3., 0.5, 2. / 3.];
+
+/// Five-line evidence on the comb at `state.x`: mean ridge support less the
+/// densest interline ink, or -1 without `foreground`.
 fn evidence(planes: &Planes, state: State) -> f64 {
-    viable_evidence(&Comb::new(planes, state.x), state, |_| true).unwrap_or(-1.)
-}
-
-fn exterior_evidence(comb: &Comb, state: State) -> f64 {
-    // Four rules plus a tie can resemble the adjacent five-line packet. The
-    // omitted fifth rule then remains visible just outside it. Include that
-    // evidence while walking, rather than correcting one phase for the whole
-    // staff after a local identity slip has already propagated to its end.
-    [-3., 3.]
+    let comb = Comb::new(planes, state.x);
+    let ridges = std::array::from_fn(|k| comb.ridges(state.h + (k as f64 - 2.) * state.d, state.m));
+    let Some(foreground) = foreground(ridges) else {
+        return -1.;
+    };
+    let background = BETWEEN
         .iter()
-        .map(|k| comb.ridges(state.h + k * state.d, state.m) / 5.)
-        .fold(0., f64::max)
+        .map(|fraction| {
+            (-2..2)
+                .map(|k| comb.ink(state.h + (f64::from(k) + fraction) * state.d, state.m))
+                .sum::<f64>()
+                / 20.
+        })
+        .fold(0., f64::max);
+    foreground - 0.8 * background
 }
 
 fn correct_phase(planes: &Planes, data: &mut [(f64, [f64; 5])]) -> i32 {
@@ -268,103 +329,151 @@ fn fit(planes: &Planes, predicted: State) -> Option<(State, [f64; 5], usize)> {
     fit_guided(planes, predicted, None)
 }
 
+/// The candidate around `predicted` with the best evidence: of all offsets,
+/// spacing ratios and slope changes the first maximum of an ascending scan.
+fn search(planes: &Planes, predicted: State, guide: Option<(f64, f64)>) -> Option<State> {
+    let ink = planes.ink;
+    let radius = (predicted.d * 0.4).ceil().max(2.) as i32;
+    let comb = Comb::new(planes, predicted.x);
+    let mut best = predicted;
+    let mut score = -1.;
+    // Candidates are visited in whichever order shares their pixels; `scan`
+    // settles ties as the ascending scan does.
+    let mut scan = usize::MAX;
+    for first in (-radius..=radius).step_by(LANES) {
+        let lanes = Lanes {
+            h: predicted.h,
+            first,
+            len: ((radius - first + 1) as usize).min(LANES),
+        };
+        for (ratio_scan, ratio) in [(1, 1.), (0, 0.96), (2, 1.04)] {
+            let upright = |dy: i32| State {
+                h: predicted.h + f64::from(dy),
+                d: predicted.d * ratio,
+                ..predicted
+            };
+            let open: [bool; LANES] = std::array::from_fn(|lane| {
+                let upright = upright(first + lane as i32);
+                lane < lanes.len
+                    && fits_guide(upright, guide)
+                    && permitted(ink, upright)
+                    && upright.h - 2. * upright.d >= 0.
+                    && upright.h + 2. * upright.d <= (ink.h - 1) as f64
+            });
+            if !open.contains(&true) {
+                continue;
+            }
+            let d = predicted.d * ratio;
+            for (slope_scan, dm) in [(1, 0.), (0, -0.2), (2, 0.2)] {
+                let m = (predicted.m + dm).clamp(-1.3, 1.3);
+                let ridges: [_; 5] =
+                    std::array::from_fn(|k| comb.ridge_tally(lanes, (k as f64 - 2.) * d, m));
+                // Interline and exterior ink only lower a rank: they are read
+                // once a lane's ridges alone could win.
+                let mut between = None;
+                let mut exterior = None;
+                for lane in (0..lanes.len).filter(|lane| open[*lane]) {
+                    let dy = first + lane as i32;
+                    let candidate_scan = ((dy + radius) as usize * 3 + ratio_scan) * 3 + slope_scan;
+                    let rank = |support: f64| {
+                        support
+                            - 0.02 * f64::from(dy).abs() / predicted.d
+                            - 0.03 * (ratio - 1.).abs()
+                            - 0.005 * dm.abs()
+                    };
+                    let wins = |support: f64| {
+                        let q = rank(support);
+                        q > score || (q == score && candidate_scan < scan)
+                    };
+                    let viable = |support: f64| support >= 0.4 && wins(support);
+                    let lines = std::array::from_fn(|k| f64::from(ridges[k][lane]));
+                    let Some(foreground) = foreground(lines).filter(|support| viable(*support))
+                    else {
+                        continue;
+                    };
+                    let between = between.get_or_insert_with(|| {
+                        BETWEEN.map(|fraction| {
+                            let mut total = [0; LANES];
+                            for k in -2..2 {
+                                let rise = (f64::from(k) + fraction) * d;
+                                for (total, count) in
+                                    total.iter_mut().zip(comb.ink_tally(lanes, rise, m))
+                                {
+                                    *total += count;
+                                }
+                            }
+                            total
+                        })
+                    });
+                    let background = between
+                        .iter()
+                        .map(|total| f64::from(total[lane]) / 20.)
+                        .fold(0., f64::max);
+                    let support = foreground - 0.8 * background;
+                    if !viable(support) {
+                        continue;
+                    }
+                    // Four rules plus a tie can resemble the adjacent five-line
+                    // packet. The omitted fifth rule then remains visible just
+                    // outside it. Include that evidence while walking, rather
+                    // than correcting one phase for the whole staff after a
+                    // local identity slip has already propagated to its end.
+                    let exterior = exterior.get_or_insert_with(|| {
+                        let [above, below] = [-3., 3.].map(|k| comb.ridge_tally(lanes, k * d, m));
+                        std::array::from_fn::<_, LANES, _>(|lane| above[lane].max(below[lane]))
+                    });
+                    let support = support - 0.35 * (f64::from(exterior[lane]) / 5.);
+                    if wins(support) {
+                        score = rank(support);
+                        scan = candidate_scan;
+                        best = State { m, ..upright(dy) };
+                    }
+                }
+            }
+        }
+    }
+    (score != -1.).then_some(best)
+}
+
 fn fit_guided(
     planes: &Planes,
     predicted: State,
     guide: Option<(f64, f64)>,
 ) -> Option<(State, [f64; 5], usize)> {
     let ink = planes.ink;
-    let radius = (predicted.d * 0.4).ceil().max(2.) as i32;
-    let comb = Comb::new(planes, predicted.x);
-    let mut best = predicted;
-    let mut score = -1.;
-    // The best of all candidates is the first maximum of an ascending scan
-    // over offset, spacing ratio and slope change. Visiting small corrections
-    // first finds it early; `scan` then still settles ties as that scan does.
-    let mut scan = usize::MAX;
-    for dy in std::iter::once(0).chain((1..=radius).flat_map(|distance| [-distance, distance])) {
-        for (ratio_scan, ratio) in [(1, 1.), (0, 0.96), (2, 1.04)] {
-            let upright = State {
-                h: predicted.h + f64::from(dy),
-                d: predicted.d * ratio,
-                ..predicted
-            };
-            if !fits_guide(upright, guide) || !permitted(ink, upright) {
-                continue;
-            }
-            if upright.h - 2. * upright.d < 0. || upright.h + 2. * upright.d > (ink.h - 1) as f64 {
-                continue;
-            }
-            for (slope_scan, dm) in [(1, 0.), (0, -0.2), (2, 0.2)] {
-                let candidate = State {
-                    m: (predicted.m + dm).clamp(-1.3, 1.3),
-                    ..upright
-                };
-                let candidate_scan = ((dy + radius) as usize * 3 + ratio_scan) * 3 + slope_scan;
-                let rank = |support: f64| {
-                    support
-                        - 0.02 * f64::from(dy).abs() / predicted.d
-                        - 0.03 * (ratio - 1.).abs()
-                        - 0.005 * dm.abs()
-                };
-                let wins = |support: f64| {
-                    let q = rank(support);
-                    q > score || (q == score && candidate_scan < scan)
-                };
-                // Interline and exterior ink only lower a rank, so a candidate
-                // whose remaining support cannot win is settled without them,
-                // usually without reading any pixel.
-                let Some(support) =
-                    viable_evidence(&comb, candidate, |support| support >= 0.4 && wins(support))
-                else {
-                    continue;
-                };
-                let support = support - 0.35 * exterior_evidence(&comb, candidate);
-                if wins(support) {
-                    score = rank(support);
-                    scan = candidate_scan;
-                    best = candidate;
-                }
-            }
-        }
-    }
     // Exterior ink ranks competing phases; it must not reject a real staff
     // under a beam or shorten the existing dropout-bridging allowance.
-    if score == -1. {
-        return None;
-    }
+    let mut best = search(planes, predicted, guide)?;
     // Refine WHOLE vertical ink-run centres rather than retaining any path
     // that happens to lie inside the stroke. Broad notehead/stem runs abstain.
     let reach = (best.d * 0.35).ceil().max(2.) as i32;
     let mut observations = vec![];
     let mut measured: [Option<f64>; 5] = [None; 5];
     for k in -2..=2 {
-        let mut centers = vec![];
+        let mut centers = [0.; 7];
+        let mut found = 0;
         // Span several staff spaces so one notehead cannot dominate all
         // run-centre measurements. Tangent alignment follows real page bends.
         for fraction in [-1.5, -1., -0.5, 0., 0.5, 1., 1.5] {
             let dx = fraction * best.d;
+            let Some(column) = planes.column(best.x + dx) else {
+                continue;
+            };
             let expected = best.h + f64::from(k) * best.d + best.m * dx;
             let y = expected.round() as i32;
             // Nearest ink; of two equally near rows the upper one.
             let near = (0..=reach)
                 .flat_map(|distance| [-distance, distance])
-                .find(|dy| planes.at(best.x + dx, f64::from(y + dy)) > 0.);
+                .find(|dy| planes.marked(column, y + dy));
             let Some(offset) = near else {
                 continue;
             };
             let mut top = y + offset;
             let mut bottom = top;
-            while top > 0
-                && expected - f64::from(top) < best.d * 0.6
-                && planes.at(best.x + dx, f64::from(top - 1)) > 0.
-            {
+            while expected - f64::from(top) < best.d * 0.6 && planes.marked(column, top - 1) {
                 top -= 1;
             }
-            while bottom + 1 < ink.h as i32
-                && f64::from(bottom) - expected < best.d * 0.6
-                && planes.at(best.x + dx, f64::from(bottom + 1)) > 0.
-            {
+            while f64::from(bottom) - expected < best.d * 0.6 && planes.marked(column, bottom + 1) {
                 bottom += 1;
             }
             // Ink-run length is an integer pixel count. Round the fractional
@@ -374,10 +483,11 @@ fn fit_guided(
                 continue;
             }
             let center = f64::from(top + bottom) / 2.;
-            centers.push(center - best.m * dx);
+            centers[found] = center - best.m * dx;
+            found += 1;
         }
-        if centers.len() >= 3 {
-            let center = median(centers);
+        if found >= 3 {
+            let center = median_in_place(&mut centers[..found]);
             measured[(k + 2) as usize] = Some(center);
             observations.push((f64::from(k), center));
         }
@@ -694,16 +804,19 @@ mod tests {
                         .iter()
                         .map(|dy| ink.at(x, y + dy))
                         .fold(0., f64::max);
-                    assert_eq!(
-                        planes.at(x, y),
-                        ink.at(x, y),
-                        "x={x}, y={y}, masked={masked}"
-                    );
+                    let inked = planes.column(x).is_some_and(|x| planes.inked(x, y));
+                    assert_eq!(inked, ink.at(x, y) > 0., "x={x}, y={y}, masked={masked}");
                     assert_eq!(
                         planes.ridge(x, y),
                         expected,
                         "x={x}, y={y}, masked={masked}"
                     );
+                }
+            }
+            for column in 0..w {
+                for row in -2..h as i32 + 2 {
+                    let inked = ink.at(column as f64, f64::from(row)) > 0.;
+                    assert_eq!(planes.marked(column, row), inked, "{column}, {row}");
                 }
             }
             for x in [-3., 0., 2.5, 3., 6.] {
@@ -716,10 +829,143 @@ mod tests {
                             .sum::<f64>()
                     };
                     assert_eq!(comb.ridges(y, m), along(&|x, y| planes.ridge(x, y)));
-                    assert_eq!(comb.ink(y, m), along(&|x, y| planes.at(x, y)));
+                    assert_eq!(comb.ink(y, m), along(&|x, y| ink.at(x, y)));
                 }
             }
         }
+    }
+
+    /// Scattered ink over five rules 12 pixels apart around row 130.
+    fn noisy_staff() -> Ink {
+        let (w, h) = (64, 260);
+        let rule = |y: usize| (82..=178).contains(&y) && (y - 82).is_multiple_of(12);
+        let noise = |i: usize| (i.wrapping_mul(2_654_435_761) >> 7).is_multiple_of(5);
+        Ink {
+            w,
+            h,
+            pixels: (0..w * h)
+                .map(|i| f64::from(u8::from(rule(i / w) ^ noise(i))))
+                .collect(),
+            seed_paper: vec![true; w * h],
+            allowed: Some((0..w * h).map(|i| !(i / 7).is_multiple_of(23)).collect()),
+        }
+    }
+
+    #[test]
+    fn tallies_equal_the_comb_counts_of_every_lane() {
+        let ink = noisy_staff();
+        let planes = Planes::new(&ink);
+        for x in [-2., 3., 30., 62.] {
+            let comb = Comb::new(&planes, x);
+            // Lanes inside, across and beyond both ends of the columns, on
+            // whole rows, rounding boundaries and between.
+            for (h, first, len) in [
+                (130., -5, 11),
+                (130.25, -8, LANES),
+                (129.5, 0, 3),
+                (3., -9, LANES),
+                (250.75, -4, LANES),
+                (400., -3, 7),
+                (f64::NAN, -2, 5),
+            ] {
+                let lanes = Lanes { h, first, len };
+                for (rise, m) in [
+                    (0., 0.),
+                    (-24., 0.25),
+                    (12.5, -0.2),
+                    (7.9, 1.3),
+                    (36., 0.125),
+                ] {
+                    let ridges = comb.ridge_tally(lanes, rise, m);
+                    let inks = comb.ink_tally(lanes, rise, m);
+                    for (lane, dy) in lanes.offsets().enumerate() {
+                        let y = (h + f64::from(dy)) + rise;
+                        let context = format!("x={x}, h={h}, dy={dy}, rise={rise}, m={m}");
+                        assert_eq!(f64::from(ridges[lane]), comb.ridges(y, m), "{context}");
+                        assert_eq!(f64::from(inks[lane]), comb.ink(y, m), "{context}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The ascending scan over every candidate that defines `search`.
+    fn scan(planes: &Planes, predicted: State, guide: Option<(f64, f64)>) -> Option<State> {
+        let ink = planes.ink;
+        let radius = (predicted.d * 0.4).ceil().max(2.) as i32;
+        let comb = Comb::new(planes, predicted.x);
+        let mut best = None;
+        let mut score = -1.;
+        for dy in -radius..=radius {
+            for ratio in [0.96, 1., 1.04] {
+                for dm in [-0.2, 0., 0.2] {
+                    let state = State {
+                        h: predicted.h + f64::from(dy),
+                        d: predicted.d * ratio,
+                        m: (predicted.m + dm).clamp(-1.3, 1.3),
+                        ..predicted
+                    };
+                    let support = evidence(planes, state);
+                    if !fits_guide(state, guide)
+                        || !permitted(ink, state)
+                        || state.h - 2. * state.d < 0.
+                        || state.h + 2. * state.d > (ink.h - 1) as f64
+                        || support < 0.4
+                    {
+                        continue;
+                    }
+                    let exterior = [-3., 3.]
+                        .iter()
+                        .map(|k| comb.ridges(state.h + k * state.d, state.m) / 5.)
+                        .fold(0., f64::max);
+                    let rank = support
+                        - 0.35 * exterior
+                        - 0.02 * f64::from(dy).abs() / predicted.d
+                        - 0.03 * (ratio - 1.).abs()
+                        - 0.005 * dm.abs();
+                    if rank > score {
+                        score = rank;
+                        best = Some(state);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn search_finds_the_first_maximum_of_the_ascending_scan() {
+        let ink = noisy_staff();
+        let planes = Planes::new(&ink);
+        let mut found = 0;
+        // Spacings of one and of two lane groups, at and off the staff and
+        // against both ends of the image.
+        for (h, d) in [
+            (130., 12.),
+            (127.4, 11.3),
+            (133.2, 12.6),
+            (120., 22.),
+            (30., 12.),
+            (236., 12.),
+        ] {
+            for x in [2., 17., 31.5, 60.] {
+                for m in [-1.25, -0.3, 0., 0.07, 0.4] {
+                    for guide in [None, Some((129., 12.)), Some((90., 12.))] {
+                        let predicted = State { x, h, d, m };
+                        let expected = scan(&planes, predicted, guide);
+                        let state = search(&planes, predicted, guide);
+                        let fields = |state: State| [state.x, state.h, state.d, state.m];
+                        assert_eq!(
+                            state.map(fields),
+                            expected.map(fields),
+                            "x={x}, h={h}, d={d}, m={m}, guide={guide:?}"
+                        );
+                        found += usize::from(state.is_some());
+                    }
+                }
+            }
+        }
+        assert!(found > 50, "only {found} searches found a staff");
     }
 
     #[test]

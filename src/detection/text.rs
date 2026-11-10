@@ -4,7 +4,7 @@ use crate::math::median;
 use std::collections::VecDeque;
 
 use crate::geometry::Point;
-use image::{GrayImage, imageops};
+use image::GrayImage;
 use serde::{Deserialize, Serialize};
 
 use crate::rendering::output::binarize_sauvola;
@@ -74,11 +74,7 @@ pub fn detect_text_lines(gray: &GrayImage, protected_music: &[[f64; 4]]) -> Vec<
         (f64::from(gray.width()) * scale).round() as u32,
         (f64::from(gray.height()) * scale).round() as u32,
     );
-    let image = if scale < 1. {
-        imageops::resize(gray, w, h, imageops::FilterType::Triangle)
-    } else {
-        gray.clone()
-    };
+    let image = super::resample::resize_triangle(gray, w, h);
     let binary = binarize_sauvola(&image);
     let (w, h) = (w as usize, h as usize);
     let mut allowed = vec![true; w * h];

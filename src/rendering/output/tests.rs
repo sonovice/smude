@@ -37,16 +37,17 @@ mod distance_and_cache {
                     }
                 }
                 let mut wide: Vec<u16> = narrow.iter().map(|v| u16::from(*v)).collect();
+                let seeded = Tiles::below(&narrow, w, h, cap);
                 // Any number of bands yields the field of a single sweep.
                 for bands in [2, 3, 16] {
                     let mut banded = narrow.clone();
-                    capped_distance_in_bands(&mut banded, w, h, cap, bands);
+                    capped_distance_in_bands(&mut banded, cap, &seeded, bands);
                     let mut whole = narrow.clone();
-                    capped_distance_in_bands(&mut whole, w, h, cap, 1);
+                    capped_distance_in_bands(&mut whole, cap, &seeded, 1);
                     assert_eq!(banded, whole, "cap={cap}, bands={bands}");
                 }
-                capped_distance(&mut narrow, w, h, cap);
-                capped_distance(&mut wide, w, h, u16::from(cap));
+                capped_distance(&mut narrow, cap, &seeded);
+                capped_distance(&mut wide, u16::from(cap), &seeded);
                 for y in 0..h {
                     for x in 0..w {
                         let outside = |v: usize, low: usize, high: usize| {
@@ -86,6 +87,223 @@ mod distance_and_cache {
                             "{w}x{h} r{radius} ({x},{y})"
                         );
                     }
+                }
+            }
+        }
+    }
+    #[test]
+    fn tiles_grow_by_whole_tiles_and_span_their_pixels() {
+        let (w, h) = (300_usize, 200_usize);
+        let zeros = [(0_usize, 0_usize), (130, 70), (299, 199), (64, 127)];
+        let mut field = vec![1_u8; w * h];
+        let mut inserted = Tiles::empty(w, h);
+        for (x, y) in zeros {
+            field[y * w + x] = 0;
+            inserted.insert(x, y);
+        }
+        let tiles = Tiles::below(&field, w, h, 1);
+        let covered = |tiles: &Tiles| {
+            let mut covered = vec![false; w * h];
+            for run in tiles.spans().runs() {
+                assert!(!covered[run.clone()].contains(&true), "runs overlap");
+                covered[run].fill(true);
+            }
+            covered
+        };
+        // Whether a zero lies within `reach` tiles of each pixel.
+        let near = |reach: usize| -> Vec<bool> {
+            (0..w * h)
+                .map(|i| {
+                    zeros.iter().any(|(x, y)| {
+                        (x / TILE).abs_diff(i % w / TILE) <= reach
+                            && (y / TILE).abs_diff(i / w / TILE) <= reach
+                    })
+                })
+                .collect()
+        };
+        assert_eq!(covered(&tiles), near(0));
+        assert_eq!(covered(&inserted), near(0));
+        for pixels in [0, 1, TILE, TILE + 1, 200] {
+            let reach = pixels.div_ceil(TILE);
+            assert_eq!(covered(&tiles.grown(pixels)), near(reach), "{pixels}");
+        }
+        for cap in [1, 2, TILE + 1, TILE + 2] {
+            let reach = (cap - 1).div_ceil(TILE) + 1;
+            assert_eq!(covered(&tiles.swept(cap)), near(reach), "cap={cap}");
+        }
+        let mut both = Tiles::empty(w, h);
+        both.insert(280, 10);
+        both.include(&tiles);
+        let expected: Vec<bool> = (near(0).iter().enumerate())
+            .map(|(i, near)| *near || (i % w >= 4 * TILE && i / w < TILE))
+            .collect();
+        assert_eq!(covered(&both), expected);
+        assert!(!covered(&Tiles::empty(w, h)).contains(&true));
+    }
+    #[test]
+    fn distance_sweeps_keep_to_the_tiles_of_the_seeds_they_are_given() {
+        let (w, h) = (400_usize, 300_usize);
+        let seeds: Vec<(usize, usize)> = (0..90).map(|i| (i * 7919 % w, i * 104_729 % h)).collect();
+        let covered = |tiles: &Tiles| {
+            let mut covered = vec![false; w * h];
+            for run in tiles.spans().runs() {
+                covered[run].fill(true);
+            }
+            covered
+        };
+        for cap in [2_u8, 9, 40, 70] {
+            // Only the seeds on the left are announced; the others are swept
+            // where an announced one is near and are no seeds elsewhere.
+            let mut seeded = Tiles::empty(w, h);
+            for &(x, y) in seeds.iter().filter(|(x, _)| *x < w / 2) {
+                seeded.insert(x, y);
+            }
+            let (announced, swept) = (covered(&seeded), covered(&seeded.swept(cap.into())));
+            // Values that would spoil the field if a sweep read them.
+            let mut source: Vec<u8> = (swept.iter().enumerate())
+                .map(|(i, swept)| if *swept { cap } else { 1 + (i % 2) as u8 })
+                .collect();
+            let seeds: Vec<(usize, usize)> = (seeds.iter().copied())
+                .filter(|(x, y)| swept[y * w + x])
+                .collect();
+            for &(x, y) in &seeds {
+                source[y * w + x] = 0;
+            }
+            for bands in [1, 3] {
+                let mut field = source.clone();
+                capped_distance_in_bands(&mut field, cap, &seeded, bands);
+                for (i, value) in field.iter().enumerate() {
+                    if !swept[i] {
+                        assert_eq!(*value, source[i], "cap={cap}, pixel {i} untouched");
+                        continue;
+                    }
+                    let near = (seeds.iter())
+                        .map(|(x, y)| {
+                            (
+                                x.abs_diff(i % w).max(y.abs_diff(i / w)),
+                                announced[y * w + x],
+                            )
+                        })
+                        .filter(|(distance, _)| *distance < usize::from(cap));
+                    let exact = (near.clone().map(|(distance, _)| distance).min())
+                        .map_or(cap, |distance| distance as u8);
+                    assert!(*value >= exact, "cap={cap}, pixel {i} too small");
+                    if near.clone().all(|(_, announced)| announced) {
+                        assert_eq!(*value, exact, "cap={cap}, pixel {i}");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn mask_erosion_composes_radii_beyond_the_range_of_its_field() {
+        let (w, h) = (700_usize, 640_usize);
+        let zeros = [
+            (0_usize, 0_usize),
+            (699, 30),
+            (350, 5),
+            (120, 639),
+            (40, 320),
+        ];
+        for radius in [1_usize, 64, 253, 254, 300] {
+            let mut mask = vec![1_u8; w * h];
+            for (x, y) in zeros {
+                mask[y * w + x] = 0;
+            }
+            erode_mask(&mut mask, w, h, radius);
+            for (i, value) in mask.iter().enumerate() {
+                let (x, y) = (i % w, i / w);
+                let inside = x >= radius && y >= radius && x + radius < w && y + radius < h;
+                let clear =
+                    (zeros.iter()).all(|(zx, zy)| zx.abs_diff(x).max(zy.abs_diff(y)) > radius);
+                assert_eq!(*value, u8::from(inside && clear), "r{radius} ({x},{y})");
+            }
+        }
+    }
+    #[test]
+    fn rim_support_answers_box_queries_like_a_scan_of_its_pixels() {
+        let (w, h, cap) = (90_usize, 70_usize, 130_u16);
+        let distance: Vec<u16> = (0..w * h).map(|i| (i * 31 % 131) as u16).collect();
+        let points: Vec<usize> = (0..w * h).filter(|i| i % 53 == 0).collect();
+        let (mut hits, mut queries) = (0, 0);
+        for gap in [1, 9, 40] {
+            let mut support = RimSupport::new(w, h, gap, cap);
+            assert!(!support.supports([0, 0, w - 1, h - 1], &[u64::MAX; 3], &distance));
+            let (first, rest) = points.split_at(points.len() / 3);
+            support.extend(first, &distance);
+            support.extend(rest, &distance);
+            for query in 0..400_usize {
+                let (x0, y0) = (query * 37 % w, query * 53 % h);
+                let (x1, y1) = ((x0 + query % 23).min(w - 1), (y0 + query % 17).min(h - 1));
+                let mut levels = [0_u64; 3];
+                for level in (query % 7..=usize::from(cap)).step_by(1 + query % 40) {
+                    levels[level / 64] |= 1 << (level % 64);
+                }
+                let expected = points.iter().any(|&i| {
+                    let level = usize::from(distance[i]);
+                    (x0..=x1).contains(&(i % w))
+                        && (y0..=y1).contains(&(i / w))
+                        && levels[level / 64] >> (level % 64) & 1 != 0
+                });
+                let actual = support.supports([x0, y0, x1, y1], &levels, &distance);
+                assert_eq!(actual, expected, "gap={gap}, query {query}");
+                hits += usize::from(expected);
+                queries += 1;
+            }
+        }
+        assert!(
+            hits > queries / 10 && hits < queries * 9 / 10,
+            "{hits} of {queries}"
+        );
+    }
+    #[test]
+    fn contour_tangents_match_a_scan_of_every_segment() {
+        let point = |x: f64, y: f64| crate::geometry::Point { x, y };
+        // Far more segments than one run holds: a wobbly outline with a
+        // repeated point, and a square whose centre and diagonals tie.
+        let mut wobbly: Vec<_> = (0..150)
+            .map(|i| {
+                let angle = f64::from(i) * std::f64::consts::TAU / 150.;
+                let radius = 60. + 9. * (7. * angle).sin();
+                point(
+                    100. + radius * angle.cos(),
+                    80. + 0.7 * radius * angle.sin(),
+                )
+            })
+            .collect();
+        wobbly.insert(40, wobbly[40]);
+        let side = |from: (f64, f64), to: (f64, f64)| {
+            (0..40).map(move |i| {
+                let t = f64::from(i) / 40.;
+                point(from.0 + t * (to.0 - from.0), from.1 + t * (to.1 - from.1))
+            })
+        };
+        let square: Vec<_> = side((20., 0.), (180., 0.))
+            .chain(side((180., 0.), (180., 160.)))
+            .chain(side((180., 160.), (20., 160.)))
+            .chain(side((20., 160.), (20., 0.)))
+            .collect();
+        for contour in [wobbly, square] {
+            let tangents = ContourTangents::new(&contour);
+            for y in (0..=160).step_by(4) {
+                for x in (0..=200).step_by(4) {
+                    let (cx, cy) = (f64::from(x), f64::from(y));
+                    let mut closest = f64::INFINITY;
+                    let mut expected = (0., 0.);
+                    for (a, b) in contour.iter().zip(contour.iter().cycle().skip(1)) {
+                        let (dx, dy) = (b.x - a.x, b.y - a.y);
+                        let norm = dx * dx + dy * dy;
+                        if norm < 1e-9 {
+                            continue;
+                        }
+                        let t = (((cx - a.x) * dx + (cy - a.y) * dy) / norm).clamp(0., 1.);
+                        let d = (cx - a.x - t * dx).powi(2) + (cy - a.y - t * dy).powi(2);
+                        if d < closest {
+                            closest = d;
+                            expected = (dx / norm.sqrt(), dy / norm.sqrt());
+                        }
+                    }
+                    assert_eq!(tangents.nearest(cx, cy), expected, "({cx},{cy})");
                 }
             }
         }

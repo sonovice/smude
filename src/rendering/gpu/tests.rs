@@ -1,4 +1,5 @@
 use super::*;
+use crate::geometry::fit::Nearby;
 use crate::geometry::{Config, Observations, Staff};
 use crate::rendering::RenderBackend;
 
@@ -57,8 +58,21 @@ fn scene() -> (Geometry, RgbImage) {
 fn adaptive_map_preserves_inverse_geometry_on_an_independent_pixel_lattice() {
     let (geometry, _) = scene();
     let (width, height) = geometry.raster_size(None).unwrap();
-    let map = map::Map::build(&geometry, width, height).unwrap();
+    let map = map::Map::new(&geometry, width, height);
+    let band = map.band(0..map.rows).unwrap();
     let [x0, y0, x1, y1] = geometry.report().bounds;
+    // The buffers as the shader binds them.
+    let roots: Vec<_> = band.roots().collect();
+    let nodes: Vec<_> = band
+        .strips
+        .iter()
+        .flat_map(|s| s.nodes.iter().copied())
+        .collect();
+    let dense: Vec<_> = band
+        .strips
+        .iter()
+        .flat_map(|s| s.dense.iter().copied())
+        .collect();
     let mut worst = 0_f64;
     for y in (1..height).step_by(7) {
         for x in (1..width).step_by(11) {
@@ -66,12 +80,13 @@ fn adaptive_map_preserves_inverse_geometry_on_an_independent_pixel_lattice() {
                 x: x0 + (x1 - x0) * f64::from(x) / f64::from(width - 1),
                 y: y0 + (y1 - y0) * f64::from(y) / f64::from(height - 1),
             });
-            let mut index = map.roots[(y / 32 * map.columns + x / 32) as usize] as usize;
+            let root = roots[(y / 32 * map.columns + x / 32) as usize];
+            let mut index = root[0] as usize;
             let (mut ox, mut oy, mut size) = (x / 32 * 32, y / 32 * 32, 32);
             let actual = loop {
-                let n = map.nodes[index];
+                let n = nodes[index];
                 if n.mode == 2 {
-                    break map.dense[(n.offset + (y - oy) * size + x - ox) as usize];
+                    break dense[(root[1] + n.offset + (y - oy) * size + x - ox) as usize];
                 }
                 if n.mode == 0 {
                     let t = [(x - ox) as f32 / size as f32, (y - oy) as f32 / size as f32];
@@ -89,12 +104,94 @@ fn adaptive_map_preserves_inverse_geometry_on_an_independent_pixel_lattice() {
                 let dy = u32::from(y >= oy + size);
                 ox += dx * size;
                 oy += dy * size;
-                index = (n.offset + dx + dy * 2) as usize;
+                index = (root[0] + n.offset + dx + dy * 2) as usize;
             };
             worst = worst.max((f64::from(actual[0]) - p.x).hypot(f64::from(actual[1]) - p.y));
         }
     }
     assert!(worst <= 0.04, "independent source-pixel error: {worst}");
+}
+
+#[test]
+fn bands_are_the_parts_of_a_band_over_all_rows() {
+    let (geometry, _) = scene();
+    let (width, height) = geometry.raster_size(None).unwrap();
+    let map = map::Map::new(&geometry, width, height);
+    let whole = map.band(0..map.rows).unwrap();
+    let split = map.rows / 3;
+    let parts = [0..split, split..map.rows].map(|rows| map.band(rows).unwrap());
+    let nodes = |band: &map::Band| -> Vec<u8> {
+        let strips = band.strips.iter();
+        strips
+            .flat_map(|s| bytemuck::cast_slice(&s.nodes))
+            .copied()
+            .collect()
+    };
+    let dense = |band: &map::Band| -> Vec<u8> {
+        let strips = band.strips.iter();
+        strips
+            .flat_map(|s| bytemuck::cast_slice(&s.dense))
+            .copied()
+            .collect()
+    };
+    assert_eq!(nodes(&whole), parts.each_ref().map(nodes).concat());
+    assert_eq!(dense(&whole), parts.each_ref().map(dense).concat());
+    // Roots count from the first node and exact coordinate of their band.
+    let first = [parts[0].nodes() as u32, parts[0].dense() as u32];
+    let second = parts[1]
+        .roots()
+        .map(|root| [first[0] + root[0], first[1] + root[1]]);
+    let roots: Vec<_> = parts[0].roots().chain(second).collect();
+    assert_eq!(whole.roots().collect::<Vec<_>>(), roots);
+}
+
+#[test]
+fn exact_coordinates_are_the_inverse_evaluated_one_pixel_at_a_time() {
+    let (geometry, _) = scene();
+    let (width, height) = geometry.raster_size(None).unwrap();
+    let map = map::Map::new(&geometry, width, height);
+    let band = map.band(0..map.rows).unwrap();
+    let [x0, y0, x1, y1] = geometry.report().bounds;
+    let nodes: Vec<_> = band
+        .strips
+        .iter()
+        .flat_map(|s| s.nodes.iter().copied())
+        .collect();
+    let dense: Vec<_> = band
+        .strips
+        .iter()
+        .flat_map(|s| s.dense.iter().copied())
+        .collect();
+    let mut checked = 0;
+    for (tile, root) in (0..).zip(band.roots()) {
+        let origin = [tile % map.columns * 32, tile / map.columns * 32];
+        let mut open = vec![(root[0], origin, 32)];
+        while let Some((index, [ox, oy], size)) = open.pop() {
+            let node = nodes[index as usize];
+            if node.mode == 1 {
+                let half = size / 2;
+                open.extend((0..4).map(|k| {
+                    let origin = [ox + k % 2 * half, oy + k / 2 * half];
+                    (root[0] + node.offset + k, origin, half)
+                }));
+            } else if node.mode == 2 {
+                for (y, row) in
+                    (oy..oy + size).zip((root[1] + node.offset..).step_by(size as usize))
+                {
+                    let y = y0 + (y1 - y0) * f64::from(y) / f64::from(height - 1);
+                    let scanline = geometry.inverse_scanline(y);
+                    for (x, slot) in (ox..ox + size).zip(row..) {
+                        let x = x0 + (x1 - x0) * f64::from(x) / f64::from(width - 1);
+                        let p = scanline.at(x, &mut Nearby::default());
+                        let exact = [p.x as f32, p.y as f32].map(f32::to_bits);
+                        assert_eq!(dense[slot as usize].map(f32::to_bits), exact);
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "no node of the scene stores exact coordinates");
 }
 
 #[test]

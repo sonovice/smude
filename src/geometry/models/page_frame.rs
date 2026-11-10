@@ -294,38 +294,54 @@ impl PageAnalysisMap {
             return Err(Error::Invalid("page-analysis source dimensions differ"));
         }
         let mut out = RgbImage::from_pixel(self.width, self.height, Rgb([255; 3]));
+        let texels = source.as_raw();
+        let stride = source.width() as usize;
+        let (last_x, last_y) = (stride - 1, source.height() as usize - 1);
+        let sample = |pixel: &mut [u8], p: Point| {
+            if p.x < 0. || p.y < 0. || p.x > last_x as f64 || p.y > last_y as f64 {
+                return;
+            }
+            let x0 = p.x.floor() as usize;
+            let y0 = p.y.floor() as usize;
+            let tx = p.x - x0 as f64;
+            let ty = p.y - y0 as f64;
+            let mut sum = [0.; 3];
+            for (xx, wx) in [(x0, 1. - tx), ((x0 + 1).min(last_x), tx)] {
+                for (yy, wy) in [(y0, 1. - ty), ((y0 + 1).min(last_y), ty)] {
+                    let texel = &texels[(yy * stride + xx) * 3..][..3];
+                    for (v, c) in sum.iter_mut().zip(texel) {
+                        *v += f64::from(*c) * wx * wy;
+                    }
+                }
+            }
+            for (v, s) in pixel.iter_mut().zip(sum) {
+                *v = s.round().clamp(0., 255.) as u8;
+            }
+        };
+        // A learned grid is evaluated row by row; the columns of all rows share cells.
+        let grid = self.grid.as_ref().map(|grid| {
+            let unit_x = (0..self.width).map(|x| f64::from(x) / f64::from(self.width - 1));
+            (grid, grid.columns(unit_x))
+        });
         out.as_mut()
             .par_chunks_mut(self.width as usize * 3)
             .enumerate()
             .for_each(|(y, row)| {
-                for (x, pixel) in row.chunks_mut(3).enumerate() {
-                    let Some(p) = self.inverse(Point {
-                        x: x as f64,
-                        y: y as f64,
-                    }) else {
-                        continue;
-                    };
-                    if p.x < 0.
-                        || p.y < 0.
-                        || p.x > f64::from(source.width() - 1)
-                        || p.y > f64::from(source.height() - 1)
-                    {
-                        continue;
+                let pixels = row.chunks_exact_mut(3);
+                if let Some((grid, columns)) = &grid {
+                    let unit_y = y as f64 / f64::from(self.height - 1);
+                    for (pixel, p) in pixels.zip(grid.inverse_row(columns, unit_y)) {
+                        sample(pixel, p);
                     }
-                    let x0 = p.x.floor() as u32;
-                    let y0 = p.y.floor() as u32;
-                    let tx = p.x - f64::from(x0);
-                    let ty = p.y - f64::from(y0);
-                    let mut sum = [0.; 3];
-                    for (xx, wx) in [(x0, 1. - tx), ((x0 + 1).min(source.width() - 1), tx)] {
-                        for (yy, wy) in [(y0, 1. - ty), ((y0 + 1).min(source.height() - 1), ty)] {
-                            for (v, c) in sum.iter_mut().zip(source.get_pixel(xx, yy).0) {
-                                *v += f64::from(c) * wx * wy;
-                            }
+                } else {
+                    for (x, pixel) in pixels.enumerate() {
+                        let p = Point {
+                            x: x as f64,
+                            y: y as f64,
+                        };
+                        if let Some(p) = self.inverse(p) {
+                            sample(pixel, p);
                         }
-                    }
-                    for (v, s) in pixel.iter_mut().zip(sum) {
-                        *v = s.round().clamp(0., 255.) as u8;
                     }
                 }
             });

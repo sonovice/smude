@@ -63,6 +63,7 @@ fn smooth_profile(x: &[f64], values: &[f64], noise: f64) -> Vec<f64> {
     let mut sizes = vec![n];
     sizes.extend([65, 33, 17, 9, 5].into_iter().filter(|size| *size < n));
     let mut result = values.to_vec();
+    let mut offsets = Vec::with_capacity(n);
     for i in 0..n {
         for size in &sizes {
             if *size < 5 {
@@ -72,26 +73,28 @@ fn smooth_profile(x: &[f64], values: &[f64], noise: f64) -> Vec<f64> {
             let end = start + size;
             let scale = (x[end - 1] - x[start]).max(1e-12);
             let origin = x[i];
-            let mut normal = [[0.; 3]; 3];
+            offsets.clear();
+            offsets.extend(x[start..end].iter().map(|x| (x - origin) / scale));
+            let window = || offsets.iter().zip(&values[start..end]);
+            // The normal matrix sums row[r] * row[c] over the window, which
+            // is the same product wherever r + c agree.
+            let mut moments = [0.; 5];
             let mut rhs = [0.; 3];
-            for j in start..end {
-                let t = (x[j] - origin) / scale;
-                let row = [1., t, t * t];
+            for (t, value) in window() {
+                let row = [1., *t, t * t];
                 for (r, a) in row.iter().enumerate() {
-                    rhs[r] += a * values[j];
-                    for (c, b) in row.iter().enumerate() {
-                        normal[r][c] += a * b;
-                    }
+                    rhs[r] += a * value;
+                }
+                for (m, moment) in moments.iter_mut().enumerate() {
+                    *moment += row[m / 2] * row[m - m / 2];
                 }
             }
+            let normal = std::array::from_fn(|r| std::array::from_fn(|c| moments[r + c]));
             let Some(coeff) = solve(normal, rhs) else {
                 continue;
             };
-            let sse = (start..end)
-                .map(|j| {
-                    let t = (x[j] - origin) / scale;
-                    (values[j] - coeff[0] - coeff[1] * t - coeff[2] * t * t).powi(2)
-                })
+            let sse = window()
+                .map(|(t, value)| (value - coeff[0] - coeff[1] * t - coeff[2] * t * t).powi(2))
                 .sum::<f64>();
             let freedom = (size - 3) as f64;
             // Approximate upper 95% chi-square noise budget. A real bend that

@@ -71,15 +71,19 @@ impl PageGrid {
         )
     }
 
+    /// Cell index and in-cell coordinate of a unit coordinate along one axis.
+    fn axis(&self, unit: f64) -> (usize, f64) {
+        let t = unit * (self.side - 1) as f64;
+        // Linear extension of edge cells preserves surrounding crop coordinates.
+        let i = (t.floor().max(0.) as usize).min(self.side - 2);
+        (i, t - i as f64)
+    }
+
     /// Cell indices and in-cell coordinates of a unit point.
     fn locate(&self, p: Point) -> (usize, usize, f64, f64) {
-        let n = (self.side - 1) as f64;
-        let x = p.x * n;
-        let y = p.y * n;
-        // Linear extension of edge cells preserves surrounding crop coordinates.
-        let i = (x.floor().max(0.) as usize).min(self.side - 2);
-        let j = (y.floor().max(0.) as usize).min(self.side - 2);
-        (i, j, x - i as f64, y - j as f64)
+        let (i, u) = self.axis(p.x);
+        let (j, v) = self.axis(p.y);
+        (i, j, u, v)
     }
 
     fn sample(&self, p: Point) -> (Point, Point, Point) {
@@ -102,6 +106,24 @@ impl PageGrid {
     pub fn inverse(&self, unit: Point) -> Point {
         let (i, j, u, v) = self.locate(unit);
         Self::position(self.corners(i, j), u, v)
+    }
+
+    /// Cells of raster columns: located once, they serve every `inverse_row`.
+    pub fn columns(&self, unit_x: impl Iterator<Item = f64>) -> Vec<(usize, f64)> {
+        unit_x.map(|x| self.axis(x)).collect()
+    }
+
+    /// `inverse` at each of `columns` along the raster row `unit_y`, bit for bit.
+    pub fn inverse_row<'a>(
+        &'a self,
+        columns: &'a [(usize, f64)],
+        unit_y: f64,
+    ) -> impl Iterator<Item = Point> + 'a {
+        let (j, v) = self.axis(unit_y);
+        let (top, bottom) = self.points[j * self.side..][..2 * self.side].split_at(self.side);
+        columns.iter().map(move |&(i, u)| {
+            Self::position([top[i], top[i + 1], bottom[i], bottom[i + 1]], u, v)
+        })
     }
 
     pub fn forward(&self, source: Point) -> Option<Point> {
@@ -176,6 +198,31 @@ mod tests {
                 };
                 let q = grid.forward(grid.inverse(p)).unwrap();
                 assert!((p.x - q.x).abs().max((p.y - q.y).abs()) < 1e-8);
+            }
+        }
+    }
+    #[test]
+    fn row_inverse_equals_point_inverse_including_the_extension() {
+        let grid = PageGrid::new(
+            (0..25)
+                .flat_map(|j| {
+                    (0..25).map(move |i| Point {
+                        x: 80.3 + 37.7 * i as f64 + 9. * (j as f64 * 0.21).sin(),
+                        y: 40.9 + 58.1 * j as f64 + 0.31 * (i * i) as f64,
+                    })
+                })
+                .collect(),
+        )
+        .unwrap();
+        let unit = |k: i32| f64::from(k) / 617.;
+        let columns = grid.columns((-40..=660).map(unit));
+        for y in (-40..=660).step_by(7).map(unit) {
+            for (x, p) in (-40..=660).map(unit).zip(grid.inverse_row(&columns, y)) {
+                let q = grid.inverse(Point { x, y });
+                assert_eq!(
+                    (p.x.to_bits(), p.y.to_bits()),
+                    (q.x.to_bits(), q.y.to_bits())
+                );
             }
         }
     }

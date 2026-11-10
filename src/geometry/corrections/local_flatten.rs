@@ -3,6 +3,10 @@
 use crate::geometry::Point;
 use crate::{Error, Result};
 
+/// Smallest distance in pixels between a knot of a measured staff line and
+/// the knot kept before it.
+const MEASURED_KNOT_SPACING: f64 = 2.;
+
 #[derive(Clone, Debug)]
 struct StaffCurves {
     lines: [Vec<Point>; 5],
@@ -32,6 +36,11 @@ struct LineCursor<'a> {
 impl<'a> LineCursor<'a> {
     fn new(line: &'a [Point]) -> Self {
         Self { line, hi: 1 }
+    }
+    /// A cursor for queries from `x` on.
+    fn from(line: &'a [Point], x: f64) -> Self {
+        let hi = line.partition_point(|p| p.x <= x).clamp(1, line.len() - 1);
+        Self { line, hi }
     }
     fn at(&mut self, x: f64) -> f64 {
         let line = self.line;
@@ -363,6 +372,113 @@ fn ordered(
     })
 }
 
+/// What fitting a run of consecutive intervals found besides their anchors.
+struct Sweep {
+    counts: Vec<u32>,
+    /// Reported only once every column has been fitted.
+    folds: bool,
+    min_source_gap: f64,
+    max_scale: f64,
+}
+impl Sweep {
+    /// Intervals fitted as one run. Neighbouring runs share a knot, whose
+    /// column both fit.
+    const SPAN: usize = 512;
+
+    /// Fits the intervals between `knots`, left to right: every staff line is
+    /// sampled at each knot and interval midpoint, and only the two columns
+    /// bounding the current interval are kept. `rows[h][k]` receives anchor
+    /// `h` of interval `k`.
+    fn run(
+        staffs: &[StaffCurves],
+        knots: &[f64],
+        bounds: [f64; 4],
+        rows: &mut [&mut [[f64; 4]]],
+    ) -> Result<Self> {
+        let mut cursors: Vec<_> = staffs
+            .iter()
+            .flat_map(|s| s.lines.iter())
+            .map(|line| LineCursor::from(line, knots[0]))
+            .collect();
+        let mut sample = |x: f64, heights: &mut Vec<f64>| {
+            heights.clear();
+            heights.extend(cursors.iter_mut().map(|cursor| cursor.at(x)));
+        };
+        let mut fit = ColumnFit::default();
+        let (mut left, mut middle, mut right) = (vec![], vec![], vec![]);
+        let (mut left_column, mut right_column) = (Column::default(), Column::default());
+        sample(knots[0], &mut left);
+        fit.fit(staffs, &left, knots[0], bounds, &mut left_column)?;
+        let mut sweep = Self {
+            counts: Vec::with_capacity(knots.len() - 1),
+            folds: false,
+            min_source_gap: f64::INFINITY,
+            max_scale: 0.,
+        };
+        let mut anchors = vec![];
+        let mut order = vec![];
+        for (k, pair) in knots.windows(2).enumerate() {
+            let x = (pair[0] + pair[1]) / 2.;
+            sample(x, &mut middle);
+            sample(pair[1], &mut right);
+            fit.fit(staffs, &right, pair[1], bounds, &mut right_column)?;
+            order.clear();
+            for (id, s) in staffs.iter().enumerate() {
+                if x > s.support[0] && x < s.support[1] {
+                    order.extend(5 * id..5 * id + 5);
+                }
+            }
+            order.sort_by(|a, b| middle[*a].total_cmp(&middle[*b]));
+            anchors.clear();
+            anchors.push([bounds[1]; 4]);
+            let mut hints = [0; 2];
+            for line in &order {
+                let (a, b) = (left[*line], right[*line]);
+                anchors.push([
+                    a,
+                    b,
+                    left_column.at(a, &mut hints[0]),
+                    right_column.at(b, &mut hints[1]),
+                ]);
+            }
+            anchors.push([bounds[3]; 4]);
+            // Canonicalize roundoff at a deliberately shared band boundary;
+            // no tiny negative source/target interval is admissible.
+            for i in 1..anchors.len() {
+                for endpoint in 0..2 {
+                    let source = anchors[i][endpoint] - anchors[i - 1][endpoint];
+                    let target = anchors[i][endpoint + 2] - anchors[i - 1][endpoint + 2];
+                    if source.abs() < 1e-10 && target.abs() < 1e-8 {
+                        anchors[i][endpoint] = anchors[i - 1][endpoint];
+                        anchors[i][endpoint + 2] = anchors[i - 1][endpoint + 2];
+                    }
+                }
+            }
+            for a in anchors.windows(2) {
+                for endpoint in 0..2 {
+                    let source = a[1][endpoint] - a[0][endpoint];
+                    let target = a[1][endpoint + 2] - a[0][endpoint + 2];
+                    sweep.folds |= source < 0.
+                        || target < 0.
+                        || (source == 0. && target != 0.)
+                        || (source > 0. && target == 0.);
+                    if source > 1e-10 {
+                        sweep.min_source_gap = sweep.min_source_gap.min(source);
+                        sweep.max_scale = sweep.max_scale.max(target / source);
+                    }
+                }
+            }
+            for (row, anchor) in rows.iter_mut().zip(&anchors) {
+                row[k] = *anchor;
+            }
+            sweep.counts.push(anchors.len() as u32);
+            std::mem::swap(&mut left, &mut right);
+            std::mem::swap(&mut left_column, &mut right_column);
+        }
+        Ok(sweep)
+    }
+}
+
 impl LocalFlatten {
     fn new(knots: Vec<f64>, counts: Vec<u32>, anchors: Vec<[f64; 4]>, centers: Vec<f64>) -> Self {
         let intervals = counts.len();
@@ -650,103 +766,59 @@ impl LocalFlatten {
                 }
             }
         }
-        let mut xx = vec![bounds[0], bounds[2]];
+        // Knots where the model changes shape, and those of the measured lines.
+        let mut candidates = vec![(bounds[0], true), (bounds[2], true)];
         for s in &staffs {
-            xx.extend([s.left, s.right, s.support[0], s.support[1]]);
-            xx.extend(s.lines.iter().flat_map(|l| l.iter()).map(|p| p.x));
-            // Resolve the smooth taper; observed line interpolation remains
-            // exact because every measured knot is also retained.
+            candidates.extend([s.left, s.right, s.support[0], s.support[1]].map(|x| (x, true)));
+            candidates.extend(s.lines.iter().flatten().map(|p| (p.x, false)));
+            // Resolve the smooth taper.
             for (a, b) in [(s.support[0], s.left), (s.right, s.support[1])] {
                 let n = ((b - a) / 2.).ceil().max(1.) as usize;
-                xx.extend((1..n).map(|i| a + (b - a) * i as f64 / n as f64));
+                candidates.extend((1..n).map(|i| (a + (b - a) * i as f64 / n as f64, true)));
             }
         }
-        xx.sort_by(f64::total_cmp);
-        xx.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        // The knots are swept once, left to right: every staff line is sampled
-        // at each knot and interval midpoint, and only the two columns bounding
-        // the current interval are kept.
-        let mut cursors: Vec<_> = staffs
-            .iter()
-            .flat_map(|s| s.lines.iter().map(|line| LineCursor::new(line)))
-            .collect();
-        let mut sample = |x: f64, heights: &mut Vec<f64>| {
-            heights.clear();
-            heights.extend(cursors.iter_mut().map(|cursor| cursor.at(x)));
-        };
-        let mut fit = ColumnFit::default();
-        let (mut left, mut middle, mut right) = (vec![], vec![], vec![]);
-        let (mut left_column, mut right_column) = (Column::default(), Column::default());
-        sample(xx[0], &mut left);
-        fit.fit(&staffs, &left, xx[0], bounds, &mut left_column)?;
+        candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)));
+        // Every line brings its own knots, far more than a pixel column can
+        // resolve; between two kept ones a line is replaced by its chord.
+        let mut xx = Vec::new();
+        for (x, structural) in candidates {
+            let spacing = if structural {
+                1e-9
+            } else {
+                MEASURED_KNOT_SPACING
+            };
+            if xx.last().is_none_or(|last| x - last >= spacing) {
+                xx.push(x);
+            }
+        }
         // Sized for every staff in every interval; rows no interval reaches
         // are dropped below without ever having been written.
         let intervals = xx.len() - 1;
         let mut table = vec![[0.; 4]; intervals * (5 * staffs.len() + 2)];
+        let mut spans: Vec<_> = (0..intervals)
+            .step_by(Sweep::SPAN)
+            .map(|first| (first, vec![]))
+            .collect();
+        // A canvas narrower than the knot tolerance has no interval.
+        for row in table.chunks_mut(intervals.max(1)) {
+            for ((_, rows), columns) in spans.iter_mut().zip(row.chunks_mut(Sweep::SPAN)) {
+                rows.push(columns);
+            }
+        }
+        let sweeps = crate::parallel::map_owned(spans, |(first, mut rows)| {
+            let knots = &xx[first..=(first + Sweep::SPAN).min(intervals)];
+            Sweep::run(&staffs, knots, bounds, &mut rows)
+        });
         let mut counts = Vec::with_capacity(intervals);
-        let mut anchors = vec![];
-        let mut order = vec![];
         let mut folds = false;
         let mut min_source_gap = f64::INFINITY;
         let mut max_scale = 0_f64;
-        for (k, pair) in xx.windows(2).enumerate() {
-            let x = (pair[0] + pair[1]) / 2.;
-            sample(x, &mut middle);
-            sample(pair[1], &mut right);
-            fit.fit(&staffs, &right, pair[1], bounds, &mut right_column)?;
-            order.clear();
-            for (id, s) in staffs.iter().enumerate() {
-                if x > s.support[0] && x < s.support[1] {
-                    order.extend(5 * id..5 * id + 5);
-                }
-            }
-            order.sort_by(|a, b| middle[*a].total_cmp(&middle[*b]));
-            anchors.clear();
-            anchors.push([bounds[1]; 4]);
-            let mut hints = [0; 2];
-            for line in &order {
-                let (a, b) = (left[*line], right[*line]);
-                anchors.push([
-                    a,
-                    b,
-                    left_column.at(a, &mut hints[0]),
-                    right_column.at(b, &mut hints[1]),
-                ]);
-            }
-            anchors.push([bounds[3]; 4]);
-            // Canonicalize roundoff at a deliberately shared band boundary;
-            // no tiny negative source/target interval is admissible.
-            for i in 1..anchors.len() {
-                for endpoint in 0..2 {
-                    let source = anchors[i][endpoint] - anchors[i - 1][endpoint];
-                    let target = anchors[i][endpoint + 2] - anchors[i - 1][endpoint + 2];
-                    if source.abs() < 1e-10 && target.abs() < 1e-8 {
-                        anchors[i][endpoint] = anchors[i - 1][endpoint];
-                        anchors[i][endpoint + 2] = anchors[i - 1][endpoint + 2];
-                    }
-                }
-            }
-            for a in anchors.windows(2) {
-                for endpoint in 0..2 {
-                    let source = a[1][endpoint] - a[0][endpoint];
-                    let target = a[1][endpoint + 2] - a[0][endpoint + 2];
-                    // Reported only once every column has been fitted.
-                    folds |= source < 0.
-                        || target < 0.
-                        || (source == 0. && target != 0.)
-                        || (source > 0. && target == 0.);
-                    if source > 1e-10 {
-                        min_source_gap = min_source_gap.min(source);
-                        max_scale = max_scale.max(target / source);
-                    }
-                }
-            }
-            for (h, anchor) in anchors.iter().enumerate() {
-                table[h * intervals + k] = *anchor;
-            }
-            counts.push(anchors.len() as u32);
-            std::mem::swap(&mut left, &mut right);
-            std::mem::swap(&mut left_column, &mut right_column);
+        for sweep in sweeps {
+            let sweep = sweep?;
+            counts.extend(sweep.counts);
+            folds |= sweep.folds;
+            min_source_gap = min_source_gap.min(sweep.min_source_gap);
+            max_scale = max_scale.max(sweep.max_scale);
         }
         if folds {
             return Err(Error::Invalid("local support mesh folds"));
@@ -852,14 +924,16 @@ impl LocalFlatten {
         maximum
     }
     pub(crate) fn forward(&self, p: Point) -> Point {
+        self.forward_near(p, &mut Hint::default())
+    }
+    /// `forward`, starting the band search from `hint` and updating it.
+    pub(crate) fn forward_near(&self, p: Point, hint: &mut Hint) -> Point {
         if !p.x.is_finite() || !p.y.is_finite() {
             return p;
         }
         Point {
             x: p.x,
-            y: self
-                .interval_at(p.x)
-                .at(p.x, p.y, false, &mut Hint::default()),
+            y: self.interval_at(p.x).at(p.x, p.y, false, hint),
         }
     }
     pub(crate) fn inverse(&self, p: Point) -> Point {
@@ -895,6 +969,17 @@ mod tests {
                 .collect()
         })
     }
+    /// How far a point of `line` may end up off its target when its knot is
+    /// dropped: the chord across it starts less than the knot spacing away,
+    /// so it leaves the line by less than that times the change of slope.
+    fn chord_error(line: &[Point]) -> f64 {
+        let slope = |a: Point, b: Point| (b.y - a.y) / (b.x - a.x);
+        let turn = line
+            .windows(3)
+            .map(|w| (slope(w[1], w[2]) - slope(w[0], w[1])).abs())
+            .fold(0., f64::max);
+        MEASURED_KNOT_SPACING * turn
+    }
     fn check(model: &LocalFlatten, staffs: &[[Vec<Point>; 5]], spaces: &[f64]) {
         assert!(
             model.boundary_jump_max_pixels() < 1e-7,
@@ -903,12 +988,11 @@ mod tests {
         );
         for (i, s) in staffs.iter().enumerate() {
             for (k, line) in s.iter().enumerate() {
+                let tolerance = chord_error(line) + 1e-8;
                 for p in line {
-                    assert!(
-                        (model.forward(*p).y - model.centers[i] - (k as f64 - 2.) * spaces[i])
-                            .abs()
-                            < 1e-8
-                    );
+                    let error =
+                        model.forward(*p).y - model.centers[i] - (k as f64 - 2.) * spaces[i];
+                    assert!(error.abs() < tolerance, "{p:?} is {error} off its line");
                 }
             }
         }

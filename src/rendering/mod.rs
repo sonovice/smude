@@ -76,7 +76,8 @@ impl Geometry {
         width: u32,
         height: u32,
     ) -> Result<RgbImage> {
-        self.render_cpu_at_dimensions(image, width, height)
+        self.render_profiled_at_dimensions(image, width, height, RenderBackend::Auto)
+            .map(|(image, _)| image)
     }
 
     pub fn render_profiled_at_dimensions(

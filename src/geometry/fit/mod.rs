@@ -37,6 +37,9 @@ impl Flatten {
     fn forward(&self, p: Point) -> Point {
         self.local.forward(p)
     }
+    fn forward_near(&self, p: Point, nearby: &mut Nearby) -> Point {
+        self.local.forward_near(p, &mut nearby.staff_band)
+    }
     fn inverse(&self, p: Point) -> Point {
         self.local.inverse(p)
     }
@@ -46,9 +49,8 @@ impl Flatten {
     }
 }
 
-/// What a previous [`Scanline::at`] sample found, to shorten the searches of
-/// the next sample close to it. Any state yields the same coordinates.
-#[cfg(feature = "render")]
+/// What a previous sample of the map found, to shorten the searches of the
+/// next sample close to it. Any state yields the same coordinates.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Nearby {
     staff_band: crate::geometry::corrections::local_flatten::Hint,
@@ -69,6 +71,7 @@ pub(crate) struct Scanline<'a> {
 }
 #[cfg(feature = "render")]
 impl Scanline<'_> {
+    #[cfg(test)]
     pub(crate) fn at(&self, x: f64, nearby: &mut Nearby) -> Point {
         let mut p = [Point { x, y: self.y }];
         self.fill(&[x], &mut p, nearby);
@@ -652,11 +655,39 @@ impl Geometry {
     }
 
     pub fn forward(&self, p: Point) -> Point {
-        if !p.x.is_finite() || !p.y.is_finite() {
+        self.forward_near(p, &mut Nearby::default())
+    }
+    /// `forward`, shortening its searches by those of an earlier point.
+    pub(crate) fn forward_near(&self, p: Point, nearby: &mut Nearby) -> Point {
+        let Some(flat) = self.flattened(p, nearby) else {
             return Point {
                 x: f64::NAN,
                 y: f64::NAN,
             };
+        };
+        let result = self
+            .direction_mesh
+            .forward(self.vertical.forward(self.horizontal.forward(flat)));
+        #[cfg(feature = "render")]
+        if let Some(text) = &self.text {
+            return text.forward(result);
+        }
+        result
+    }
+    /// `forward(p).y`: past the staff flattening only a text residual moves y.
+    fn forward_y(&self, p: Point, nearby: &mut Nearby) -> f64 {
+        #[cfg(feature = "render")]
+        if self.text.is_some() {
+            return self.forward_near(p, nearby).y;
+        }
+        self.flattened(p, nearby).map_or(f64::NAN, |flat| flat.y)
+    }
+    /// The stages of `forward` up to the staff flattening, unless the point
+    /// leaves the finite plane on the way.
+    fn flattened(&self, p: Point, nearby: &mut Nearby) -> Option<Point> {
+        let finite = |p: Point| p.x.is_finite() && p.y.is_finite();
+        if !finite(p) {
+            return None;
         }
         #[cfg(feature = "render")]
         let p = self.pre_page.as_ref().map_or(p, |(map, shift)| {
@@ -683,27 +714,11 @@ impl Geometry {
             }
         });
         let projected = self.projective.forward(p);
-        if !projected.x.is_finite() || !projected.y.is_finite() {
-            return Point {
-                x: f64::NAN,
-                y: f64::NAN,
-            };
+        if !finite(projected) {
+            return None;
         }
-        let flat = self.flat.forward(projected);
-        if !flat.x.is_finite() || !flat.y.is_finite() {
-            return Point {
-                x: f64::NAN,
-                y: f64::NAN,
-            };
-        }
-        let result = self
-            .direction_mesh
-            .forward(self.vertical.forward(self.horizontal.forward(flat)));
-        #[cfg(feature = "render")]
-        if let Some(text) = &self.text {
-            return text.forward(result);
-        }
-        result
+        let flat = self.flat.forward_near(projected, nearby);
+        finite(flat).then_some(flat)
     }
     /// The protected text residual alone. `forward` is this applied to the base
     /// map, so points traced before `add_text_curves` remain reusable after it.
@@ -901,11 +916,12 @@ impl Geometry {
         // Every staff sample is traced through the whole map: the costly part.
         let line_spans = crate::parallel::map(&data.staves, |s| {
             let mut span = 0_f64;
+            let mut nearby = Nearby::default();
             for k in 0..5 {
                 let values: Vec<f64> =
                     s.x.iter()
                         .zip(&s.y[k])
-                        .map(|(x, y)| self.forward(Point { x: *x, y: *y }).y)
+                        .map(|(x, y)| self.forward_y(Point { x: *x, y: *y }, &mut nearby))
                         .collect();
                 span = span.max(
                     values.iter().copied().fold(f64::NEG_INFINITY, f64::max)

@@ -3,7 +3,7 @@
 //! assembly. Input is near-upright; steep curves remain a detection limitation.
 use crate::geometry::{Barline, Observations, Point, Staff};
 use crate::math::{median, slope};
-use image::{GrayImage, RgbImage, imageops};
+use image::{GrayImage, RgbImage};
 use rayon::prelude::*;
 
 use crate::{Error, Result};
@@ -64,47 +64,58 @@ fn threshold(gray: &GrayImage) -> Ink {
     let widths: Vec<u32> = (0..w)
         .map(|x| ((x + REACH + 1).min(w) - x.saturating_sub(REACH)) as u32)
         .collect();
-    // Tone sums over the box rows of each column, and their running total
-    // from `REACH` columns before the image to as many past it: the box of
-    // column `x` then spans entries `x` and `x + 2 * REACH + 1`.
-    let mut columns = vec![0_u32; w];
-    let mut total = vec![0_u32; w + 2 * REACH + 1];
-    let mut rows = 0..0;
     let mut pixels = vec![0.; w * h];
-    for (y, (pixels, row)) in pixels
-        .chunks_exact_mut(w)
-        .zip(tones.chunks_exact(w))
+    // Bands of rows side by side, each sliding its own box down the image.
+    const BAND: usize = 512;
+    pixels
+        .par_chunks_mut((w * BAND).max(1))
         .enumerate()
-    {
-        let next = y.saturating_sub(REACH)..(y + REACH + 1).min(h);
-        for entering in tones[rows.end * w..next.end * w].chunks_exact(w) {
-            for (sum, tone) in columns.iter_mut().zip(entering) {
-                *sum += u32::from(*tone);
+        .for_each(|(band, pixels)| {
+            let first = band * BAND;
+            // Tone sums over the box rows of each column, and their running
+            // total from `REACH` columns before the image to as many past it:
+            // the box of column `x` then spans entries `x` and
+            // `x + 2 * REACH + 1`.
+            let mut columns = vec![0_u32; w];
+            let mut total = vec![0_u32; w + 2 * REACH + 1];
+            let mut rows = first.saturating_sub(REACH)..first.saturating_sub(REACH);
+            for (y, (pixels, row)) in pixels
+                .chunks_exact_mut(w)
+                .zip(tones[first * w..].chunks_exact(w))
+                .enumerate()
+            {
+                let y = first + y;
+                let next = y.saturating_sub(REACH)..(y + REACH + 1).min(h);
+                for entering in tones[rows.end * w..next.end * w].chunks_exact(w) {
+                    for (sum, tone) in columns.iter_mut().zip(entering) {
+                        *sum += u32::from(*tone);
+                    }
+                }
+                for leaving in tones[rows.start * w..next.start * w].chunks_exact(w) {
+                    for (sum, tone) in columns.iter_mut().zip(leaving) {
+                        *sum -= u32::from(*tone);
+                    }
+                }
+                rows = next;
+                let mut running = 0;
+                for (total, sum) in total[REACH + 1..].iter_mut().zip(&columns) {
+                    running += sum;
+                    *total = running;
+                }
+                total[REACH + w..].fill(running);
+                let height = rows.len() as u32;
+                let boxes = total.iter().zip(&total[2 * REACH + 1..]);
+                for (((pixel, tone), width), (left, right)) in
+                    pixels.iter_mut().zip(row).zip(&widths).zip(boxes)
+                {
+                    // `tone < sum / area - 12.` in floating point decides the
+                    // same: the quotient is never within rounding of a whole
+                    // level it is not on.
+                    let darker = (u32::from(*tone) + 12) * width * height < right - left;
+                    *pixel = f64::from(u8::from(darker));
+                }
             }
-        }
-        for leaving in tones[rows.start * w..next.start * w].chunks_exact(w) {
-            for (sum, tone) in columns.iter_mut().zip(leaving) {
-                *sum -= u32::from(*tone);
-            }
-        }
-        rows = next;
-        let mut running = 0;
-        for (total, sum) in total[REACH + 1..].iter_mut().zip(&columns) {
-            running += sum;
-            *total = running;
-        }
-        total[REACH + w..].fill(running);
-        let height = rows.len() as u32;
-        let boxes = total.iter().zip(&total[2 * REACH + 1..]);
-        for (((pixel, tone), width), (left, right)) in
-            pixels.iter_mut().zip(row).zip(&widths).zip(boxes)
-        {
-            // `tone < sum / area - 12.` in floating point decides the same: the
-            // quotient is never within rounding of a whole level it is not on.
-            let darker = (u32::from(*tone) + 12) * width * height < right - left;
-            *pixel = f64::from(u8::from(darker));
-        }
-    }
+        });
     let mut histogram = [0_usize; 256];
     for tone in tones {
         histogram[usize::from(*tone)] += 1;
@@ -528,8 +539,46 @@ pub fn detect(image: &RgbImage, max_width: u32) -> Result<Observations> {
     detect_masked(image, max_width, None, None)
 }
 
-// Rasterize scanline intersections once. Testing a several-hundred-vertex page
-// contour independently for every RGB pixel would dominate the actual warp.
+/// The columns of mask row `row` that lie inside the page contour, clipped to
+/// `width`. The crossings of the row's scanline pair up into spans, and a
+/// contour edge lying on the scanline is a span of its own, so spans may
+/// overlap. Rasterizing them once per row keeps the several-hundred-vertex
+/// contour out of the per-pixel work.
+fn region_spans(
+    region: &crate::detection::PageRegion,
+    row: usize,
+    width: usize,
+    sx: f64,
+    sy: f64,
+) -> Vec<std::ops::Range<usize>> {
+    let y = row as f64 / sy;
+    let mut intersections = vec![];
+    let mut spans = vec![];
+    for (a, b) in region
+        .contour
+        .iter()
+        .zip(region.contour.iter().cycle().skip(1))
+        .take(region.contour.len())
+    {
+        if (a.y > y) != (b.y > y) {
+            intersections.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
+        }
+        if (a.y - y).abs() < 1e-7 && (b.y - y).abs() < 1e-7 {
+            spans.push((a.x.min(b.x), a.x.max(b.x)));
+        }
+    }
+    intersections.sort_by(f64::total_cmp);
+    spans.extend(intersections.chunks_exact(2).map(|pair| (pair[0], pair[1])));
+    spans
+        .into_iter()
+        .filter_map(|(left, right)| {
+            let start = (left * sx - 1e-7).ceil().max(0.) as usize;
+            let end = ((right * sx + 1e-7).floor().max(-1.) as i64 + 1).max(0) as usize;
+            (start < end.min(width)).then_some(start..end.min(width))
+        })
+        .collect()
+}
+
 fn region_mask(
     region: &crate::detection::PageRegion,
     width: usize,
@@ -538,31 +587,9 @@ fn region_mask(
     sy: f64,
 ) -> Vec<bool> {
     let mut mask = vec![false; width * height];
-    for row in 0..height {
-        let y = row as f64 / sy;
-        let mut intersections = vec![];
-        let mut spans = vec![];
-        for (a, b) in region
-            .contour
-            .iter()
-            .zip(region.contour.iter().cycle().skip(1))
-            .take(region.contour.len())
-        {
-            if (a.y > y) != (b.y > y) {
-                intersections.push(a.x + (y - a.y) * (b.x - a.x) / (b.y - a.y));
-            }
-            if (a.y - y).abs() < 1e-7 && (b.y - y).abs() < 1e-7 {
-                spans.push((a.x.min(b.x), a.x.max(b.x)));
-            }
-        }
-        intersections.sort_by(f64::total_cmp);
-        spans.extend(intersections.chunks_exact(2).map(|pair| (pair[0], pair[1])));
-        for (left, right) in spans {
-            let start = (left * sx - 1e-7).ceil().max(0.) as usize;
-            let end = ((right * sx + 1e-7).floor().max(-1.) as i64 + 1).max(0) as usize;
-            if start < end.min(width) {
-                mask[row * width + start..row * width + end.min(width)].fill(true);
-            }
+    for (row, mask) in mask.chunks_mut(width.max(1)).enumerate() {
+        for span in region_spans(region, row, width, sx, sy) {
+            mask[span].fill(true);
         }
     }
     mask
@@ -593,20 +620,19 @@ pub fn crop_page(image: &RgbImage, region: &crate::detection::PageRegion) -> Res
     let mut crop =
         RgbImage::from_raw(width, height, pixels).expect("crop buffer matches its dimensions");
     let local = local_region(region, x0, y0);
-    let mask = region_mask(
-        &local,
-        crop.width() as usize,
-        crop.height() as usize,
-        1.,
-        1.,
-    );
     crop.par_chunks_mut(row.max(1))
-        .zip(mask.par_chunks((width as usize).max(1)))
-        .for_each(|(pixels, mask)| {
-            let (pixels, _) = pixels.as_chunks_mut::<3>();
-            for (pixel, _) in pixels.iter_mut().zip(mask).filter(|(_, inside)| !**inside) {
-                *pixel = [255; 3];
+        .enumerate()
+        .for_each(|(y, pixels)| {
+            let mut spans = region_spans(&local, y, width as usize, 1., 1.);
+            spans.sort_by_key(|span| span.start);
+            let mut outside = 0;
+            for span in spans {
+                if outside < span.start {
+                    pixels[outside * 3..span.start * 3].fill(255);
+                }
+                outside = outside.max(span.end);
             }
+            pixels[outside * 3..].fill(255);
         });
     Ok(crop)
 }
@@ -679,9 +705,9 @@ pub(crate) fn detect_masked(
     let height =
         (f64::from(image.height()) * f64::from(width) / f64::from(image.width())).round() as u32;
     let gray = crate::detection::resample::luma(image);
-    let analysis = imageops::resize(&gray, width, height, imageops::FilterType::Triangle);
+    let analysis = crate::detection::resample::resize_triangle(&gray, width, height);
     let mut ink = threshold(&analysis);
-    let color = imageops::resize(image, width, height, imageops::FilterType::Triangle);
+    let color = crate::detection::resample::resize_triangle(image, width, height);
     for (paper, pixel) in ink.seed_paper.iter_mut().zip(color.pixels()) {
         let high = *pixel.0.iter().max().unwrap() as f64;
         let low = *pixel.0.iter().min().unwrap() as f64;
@@ -823,36 +849,38 @@ mod raster_tests {
 
     #[test]
     fn threshold_equals_its_floating_point_definition() {
-        // Wider and taller than one box, with flat, noisy and edged areas.
-        let (w, h) = (83, 67);
-        let gray = GrayImage::from_fn(w, h, |x, y| {
-            let noise = (x * 31 + y * 17 + x * y) % 23;
-            let stroke = if x % 19 < 2 || y % 29 == 5 { 60 } else { 0 };
-            image::Luma([(120 + 4 * (x % 30) + noise - stroke) as u8])
-        });
-        let ink = threshold(&gray);
-        let tone = |x: u32, y: u32| f64::from(gray.get_pixel(x, y)[0]);
-        let mut tones = gray.as_raw().clone();
-        tones.sort_unstable();
-        let reference = f64::from(tones[tones.len() * 9 / 10]);
-        let mut inked = 0;
-        for y in 0..h {
-            for x in 0..w {
-                let (x0, x1) = (x.saturating_sub(25), (x + 26).min(w));
-                let (y0, y1) = (y.saturating_sub(25), (y + 26).min(h));
-                let sum = (y0..y1)
-                    .flat_map(|yy| (x0..x1).map(move |xx| (xx, yy)))
-                    .map(|(xx, yy)| u64::from(gray.get_pixel(xx, yy)[0]))
-                    .sum::<u64>();
-                let mean = sum as f64 / ((x1 - x0) * (y1 - y0)) as f64;
-                let expected = f64::from(u8::from(tone(x, y) < mean - 12.));
-                let index = (y * w + x) as usize;
-                assert_eq!(ink.pixels[index], expected, "x={x}, y={y}");
-                assert_eq!(ink.seed_paper[index], tone(x, y) >= reference * 0.65);
-                inked += expected as usize;
+        // Wider and taller than one box, with flat, noisy and edged areas; then
+        // several bands of rows, the last of them partial.
+        for (w, h) in [(83, 67), (9, 1100)] {
+            let gray = GrayImage::from_fn(w, h, |x, y| {
+                let noise = (x * 31 + y * 17 + x * y) % 23;
+                let stroke = if x % 19 < 2 || y % 29 == 5 { 60 } else { 0 };
+                image::Luma([(120 + 4 * (x % 30) + noise - stroke) as u8])
+            });
+            let ink = threshold(&gray);
+            let tone = |x: u32, y: u32| f64::from(gray.get_pixel(x, y)[0]);
+            let mut tones = gray.as_raw().clone();
+            tones.sort_unstable();
+            let reference = f64::from(tones[tones.len() * 9 / 10]);
+            let mut inked = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let (x0, x1) = (x.saturating_sub(25), (x + 26).min(w));
+                    let (y0, y1) = (y.saturating_sub(25), (y + 26).min(h));
+                    let sum = (y0..y1)
+                        .flat_map(|yy| (x0..x1).map(move |xx| (xx, yy)))
+                        .map(|(xx, yy)| u64::from(gray.get_pixel(xx, yy)[0]))
+                        .sum::<u64>();
+                    let mean = sum as f64 / ((x1 - x0) * (y1 - y0)) as f64;
+                    let expected = f64::from(u8::from(tone(x, y) < mean - 12.));
+                    let index = (y * w + x) as usize;
+                    assert_eq!(ink.pixels[index], expected, "x={x}, y={y}");
+                    assert_eq!(ink.seed_paper[index], tone(x, y) >= reference * 0.65);
+                    inked += expected as usize;
+                }
             }
+            assert!(inked > 100 && inked < (w * h) as usize / 2);
         }
-        assert!(inked > 100 && inked < (w * h) as usize / 2);
     }
 
     #[test]
