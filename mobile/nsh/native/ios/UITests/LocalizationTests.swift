@@ -2,7 +2,7 @@ import XCTest
 
 /// Simulator-only language smoke checks; no camera or user project mutation.
 final class LocalizationTests: XCTestCase {
-    let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.design")
+    let app = XCUIApplication(bundleIdentifier: "com.notavium.smude")
     func testNativeLanguageNegotiationAndCollectionName() {
         continueAfterFailure = false
         for (languages, region, title, addLabel) in [

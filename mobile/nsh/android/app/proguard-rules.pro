@@ -1,1 +1,1 @@
--keep class com.gridnotelabs.smude.design.CameraInference { *; }
+-keep class com.notavium.smude.CameraInference { *; }

@@ -1,7 +1,7 @@
 import XCTest
 
 final class NavigationTests: XCTestCase {
-    let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.design")
+    let app = XCUIApplication(bundleIdentifier: "com.notavium.smude")
     override func setUp() {
         continueAfterFailure = false
         app.launchArguments += ["-AppleLanguages", "(de)", "-AppleLocale", "de_DE"]

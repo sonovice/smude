@@ -1,7 +1,7 @@
 import XCTest
 
 final class KeyboardTests: XCTestCase {
-    let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.design")
+    let app = XCUIApplication(bundleIdentifier: "com.notavium.smude")
     func testProjectSaveRemainsAboveTheSoftwareKeyboard() throws {
         continueAfterFailure = false
         app.launchArguments += ["-AppleLanguages", "(de)", "-AppleLocale", "de_DE"]

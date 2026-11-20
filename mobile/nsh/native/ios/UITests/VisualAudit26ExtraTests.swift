@@ -1,6 +1,6 @@
 import XCTest
 final class VisualAudit26ExtraTests:XCTestCase {
- let app=XCUIApplication(bundleIdentifier:"com.gridnotelabs.smude.design")
+ let app=XCUIApplication(bundleIdentifier:"com.notavium.smude")
  func el(_ id:String)->XCUIElement {app.descendants(matching:.any).matching(identifier:id).firstMatch}
  func snap(_ name:String){let a=XCTAttachment(screenshot:XCUIScreen.main.screenshot());a.name=name;a.lifetime = .keepAlways;add(a);let d=XCTAttachment(string:app.debugDescription);d.name=name+"-hierarchy";d.lifetime = .keepAlways;add(d)}
  func tap(_ id:String){XCTAssertTrue(el(id).waitForExistence(timeout:8));el(id).tap()}

@@ -1,7 +1,7 @@
 import XCTest
 
 final class HeaderToastTests: XCTestCase {
-    let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.design")
+    let app = XCUIApplication(bundleIdentifier: "com.notavium.smude")
     func testHeaderPlusCreatesProjectAndToastDismissesOnTap() {
         continueAfterFailure = false
         app.launchArguments += ["-AppleLanguages", "(de)", "-AppleLocale", "de_DE"]

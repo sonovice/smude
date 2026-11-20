@@ -7,7 +7,7 @@ use jni::{
 };
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_gridnotelabs_smude_design_CameraInference_detect(
+pub extern "system" fn Java_com_notavium_smude_CameraInference_detect(
     env: JNIEnv<'_>,
     _class: JClass<'_>,
     buffer: JByteBuffer<'_>,

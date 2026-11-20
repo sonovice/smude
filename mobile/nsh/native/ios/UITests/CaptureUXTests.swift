@@ -2,7 +2,7 @@ import XCTest
 
 /// Simulator UI only. Physical devices receive installation without tests.
 final class CaptureUXTests:XCTestCase {
-    let app=XCUIApplication(bundleIdentifier:"com.gridnotelabs.smude.design")
+    let app=XCUIApplication(bundleIdentifier:"com.notavium.smude")
     func item(_ id:String)->XCUIElement{app.descendants(matching:.any).matching(identifier:id).firstMatch}
     func testCollectionHeaderComparisonPagerAndPhonePortrait(){
         continueAfterFailure=false

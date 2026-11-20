@@ -1,6 +1,6 @@
 name: smude-mobile
 options:
-  bundleIdPrefix: com.gridnotelabs.smude.mobile
+  bundleIdPrefix: com.notavium.smude.tauri
   deploymentTarget:
     iOS: 16.0
 fileGroups: [../../src]
@@ -11,7 +11,7 @@ settingGroups:
   app:
     base:
       PRODUCT_NAME: Smude
-      PRODUCT_BUNDLE_IDENTIFIER: com.gridnotelabs.smude.mobile
+      PRODUCT_BUNDLE_IDENTIFIER: com.notavium.smude.tauri
       DEVELOPMENT_TEAM: 76CP95AA8F
 targetTemplates:
   app:
@@ -110,7 +110,7 @@ targets:
       - target: smude-mobile_iOS
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.gridnotelabs.smude.mobile.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: com.notavium.smude.tauri.uitests
         DEVELOPMENT_TEAM: 76CP95AA8F
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: smude-mobile_iOS

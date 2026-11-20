@@ -2,7 +2,7 @@ import XCTest
 
 /// Simulator-only: Reorder26 is a 30-page collection of copied test fixtures.
 final class Reordering26Tests: XCTestCase {
-    let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.design")
+    let app = XCUIApplication(bundleIdentifier: "com.notavium.smude")
     func item(_ id: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: id).firstMatch
     }

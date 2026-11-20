@@ -5,7 +5,7 @@ import UIKit
 /// with source=null: the retained preview persists without starting a worker.
 final class Progress32Tests: XCTestCase {
     func testPendingProgressKeepsTileGeometry() {
-        let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.design")
+        let app = XCUIApplication(bundleIdentifier: "com.notavium.smude")
         app.launch()
         let collection = app.descendants(matching: .any).matching(identifier: "project-27000").firstMatch
         XCTAssertTrue(collection.waitForExistence(timeout: 10))

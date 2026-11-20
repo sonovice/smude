@@ -2,7 +2,7 @@ import XCTest
 
 /// Native rendering regression: distinct actions must not share one capsule.
 final class HeaderButtons25Tests:XCTestCase {
- let app=XCUIApplication(bundleIdentifier:"com.gridnotelabs.smude.design")
+ let app=XCUIApplication(bundleIdentifier:"com.notavium.smude")
  func item(_ id:String)->XCUIElement{app.descendants(matching:.any).matching(identifier:id).firstMatch}
  func assertSeparate(_ first:String,_ second:String,file:StaticString=#filePath,line:UInt=#line){
   let left=item(first),right=item(second)

@@ -2,7 +2,7 @@ import XCTest
 
 /// Explicit four-page fixture installed in the simulator archive by the test harness.
 final class ProjectGesturesTests: XCTestCase {
-    let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.design")
+    let app = XCUIApplication(bundleIdentifier: "com.notavium.smude")
     func element(_ id: String) -> XCUIElement { app.descendants(matching: .any).matching(identifier: id).firstMatch }
     func testLongPressReorderSelectionShareAndDelete() {
         continueAfterFailure = false

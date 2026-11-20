@@ -22,7 +22,7 @@ root.innerHTML = `<header><div class="brand"><svg viewBox="0 0 28 28" aria-hidde
 <section class="model-picker" aria-label="Entzerrungsverfahren"><span>Entzerrung</span><div class="segments" role="group" aria-label="Verfahren"><button id="model-gcs" aria-pressed="false">GCS</button><button id="model-mesh" aria-pressed="true">Mesh</button></div></section>
 <section class="status" role="status" aria-live="polite"><i></i><span id="status">Bereit</span></section>
 <section class="previews"><article><div class="card-head"><span>Original</span><small id="source-size"></small></div><div class="image-box" id="source-box"><span class="placeholder">Dein Notenbild</span><img id="source" hidden alt="Originalbild"></div></article><div id="results"></div></section>
-<p class="error" id="error" role="alert" hidden></p><footer><span>GRIDNOTE LABS</span><small id="device"></small></footer>`;
+<p class="error" id="error" role="alert" hidden></p><footer><span>NOTAVIUM</span><small id="device"></small></footer>`;
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 function status(message: string) {
   $('status').textContent = message; root.classList.toggle('busy', busy);

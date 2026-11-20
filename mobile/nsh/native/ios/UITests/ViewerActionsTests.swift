@@ -2,7 +2,7 @@ import XCTest
 
 /// Uses an existing simulator page; does not rotate, replace or delete it.
 final class ViewerActionsTests: XCTestCase {
-    let app=XCUIApplication(bundleIdentifier:"com.gridnotelabs.smude.design")
+    let app=XCUIApplication(bundleIdentifier:"com.notavium.smude")
     func testCompactPageActionsAndNativeMoreChooser() {
         continueAfterFailure=false
         app.launchArguments=["-AppleLanguages","(de)","-AppleLocale","de_DE"]

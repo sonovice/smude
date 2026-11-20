@@ -37,7 +37,7 @@ Es gibt für diese realen Fotos keine digitale Ground Truth und keine manuelle V
 
 ## Direkter iPhone-Laufzeitvergleich
 
-Eigenständige Benchmark-App `com.gridnotelabs.smude.photometryab`; vorhandene Smude-App bleibt unverändert. Derselbe entzerrte Ausschnitt von **Testseite 6, 4561×6236 Pixel = 28,44 MP**, iPhone 16 Pro, iOS 26.6.2, Release-Build, thermischer Zustand nominal.
+Eigenständige Benchmark-App `com.notavium.smude.photometryab`; vorhandene Smude-App bleibt unverändert. Derselbe entzerrte Ausschnitt von **Testseite 6, 4561×6236 Pixel = 28,44 MP**, iPhone 16 Pro, iOS 26.6.2, Release-Build, thermischer Zustand nominal.
 
 | Pfad | Warmer Median | Warme Einzelwerte | Erster Durchlauf |
 | --- | ---: | ---: | ---: |

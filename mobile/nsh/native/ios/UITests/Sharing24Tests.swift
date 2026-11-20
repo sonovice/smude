@@ -2,7 +2,7 @@ import XCTest
 
 /// Native simulator QA only; no launch or tests on physical devices.
 final class Sharing24Tests:XCTestCase {
-    let app=XCUIApplication(bundleIdentifier:"com.gridnotelabs.smude.design")
+    let app=XCUIApplication(bundleIdentifier:"com.notavium.smude")
     func item(_ id:String)->XCUIElement{app.descendants(matching:.any).matching(identifier:id).firstMatch}
     func capture(_ name:String){let a=XCTAttachment(screenshot:app.screenshot());a.name=name;a.lifetime = .keepAlways;add(a)}
     func testCameraHeaderViewerAndMinimalPdfShare(){

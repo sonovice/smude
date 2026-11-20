@@ -32,7 +32,7 @@ pub fn init<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
         .setup(|_app, _api| {
             #[cfg(target_os = "android")]
             let handle =
-                _api.register_android_plugin("com.gridnotelabs.smude.mobile", "DevicePlugin")?;
+                _api.register_android_plugin("com.notavium.smude.tauri", "DevicePlugin")?;
             #[cfg(target_os = "ios")]
             let handle = _api.register_ios_plugin(init_plugin_smude_device)?;
             #[cfg(any(target_os = "ios", target_os = "android"))]

@@ -15,7 +15,7 @@ Set `ANDROID_HOME` (and optionally `ANDROID_NDK_HOME`) to the installed SDK/NDK.
 ```
 
 The result is `app/build/outputs/apk/debug/app-debug.apk`, package
-`com.gridnotelabs.smude.design`, separate from the existing mobile app. The build
+`com.notavium.smude`, separate from the existing mobile app. The build
 first generates Smude's `libnsh.so`, then combines it with NSH's Java classes and
 CameraX. **Do not install the intermediate NSH CLI APK:** the stock Activity does
 not register this camera component. No stock `libnsh.so` is packaged alongside
@@ -29,7 +29,7 @@ the expected `nsh/assets/` tree. Generated outputs and SDK paths stay out of Git
 ```sh
 ./gradlew :app:compileDebugJavaWithJavac :app:lintDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n com.gridnotelabs.smude.design/.MainActivity
+adb shell am start -n com.notavium.smude/.MainActivity
 ```
 
 ## Camera contract

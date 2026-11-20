@@ -3,7 +3,7 @@ import XCTest
 final class SmudeMobileUITests: XCTestCase {
     func testSwitchModelsForAnExistingPhoto() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.mobile")
+        let app = XCUIApplication(bundleIdentifier: "com.notavium.smude.tauri")
         app.launchEnvironment["SMUDE_AUTORUN"] = "0"
         app.launch()
         XCTAssertTrue(app.switches["GCS"].waitForExistence(timeout: 15))
@@ -27,7 +27,7 @@ final class SmudeMobileUITests: XCTestCase {
 
     func testModelBackendProbe() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.mobile")
+        let app = XCUIApplication(bundleIdentifier: "com.notavium.smude.tauri")
         app.launchEnvironment["SMUDE_AUTORUN"] = "1"
         app.launchEnvironment["SMUDE_BENCH_MODELS"] = "1"
         app.launchEnvironment["SMUDE_COREML_UNITS"] = "gpu"
@@ -38,7 +38,7 @@ final class SmudeMobileUITests: XCTestCase {
 
     func testCameraInterface() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.mobile")
+        let app = XCUIApplication(bundleIdentifier: "com.notavium.smude.tauri")
         app.launchEnvironment["SMUDE_AUTORUN"] = "0"
         app.launch()
         XCTAssertTrue(app.buttons["Foto aufnehmen"].waitForExistence(timeout: 15))
@@ -57,7 +57,7 @@ final class SmudeMobileUITests: XCTestCase {
 
     func testCameraCaptureImportsFullResolutionPhoto() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.mobile")
+        let app = XCUIApplication(bundleIdentifier: "com.notavium.smude.tauri")
         app.launchEnvironment["SMUDE_AUTORUN"] = "0"
         app.launch()
         XCTAssertTrue(app.buttons["Foto aufnehmen"].waitForExistence(timeout: 15))
@@ -76,7 +76,7 @@ final class SmudeMobileUITests: XCTestCase {
 
     func testFullResolutionProcessingAndNativeExportDialog() throws {
         continueAfterFailure = false
-        let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.mobile")
+        let app = XCUIApplication(bundleIdentifier: "com.notavium.smude.tauri")
         app.launchEnvironment["SMUDE_AUTORUN"] = "1"
         app.launchEnvironment["SMUDE_VERIFY_EXPORT"] = "1"
         app.launch()

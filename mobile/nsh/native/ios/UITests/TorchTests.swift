@@ -1,7 +1,7 @@
 import XCTest
 
 final class TorchTests: XCTestCase {
-    let app = XCUIApplication(bundleIdentifier: "com.gridnotelabs.smude.design")
+    let app = XCUIApplication(bundleIdentifier: "com.notavium.smude")
     func testTorchStartsOffAndFollowsHardwareAcrossCameraAndBackground() {
         continueAfterFailure = false
         app.launchArguments += ["-AppleLanguages", "(de)", "-AppleLocale", "de_DE"]

@@ -13,7 +13,7 @@ targets:
         includes: [ControlsView.swift]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.gridnotelabs.smude.design.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.notavium.smude.tests
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_VERSION: '5.0'
         DEVELOPMENT_TEAM: 76CP95AA8F

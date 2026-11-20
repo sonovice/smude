@@ -20,5 +20,5 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 # Registered from the Rust mobile adapter.
--keep class com.gridnotelabs.smude.mobile.DevicePlugin { *; }
--keep class com.gridnotelabs.smude.mobile.ExportArgs { *; }
+-keep class com.notavium.smude.tauri.DevicePlugin { *; }
+-keep class com.notavium.smude.tauri.ExportArgs { *; }

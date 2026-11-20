@@ -63,11 +63,11 @@ val prepareLauncherIcon = tasks.register<Sync>("prepareLauncherIcon") {
 }
 
 android {
-    namespace = "com.gridnotelabs.smude.design"
+    namespace = "com.notavium.smude"
     compileSdk = 36
     ndkVersion = "29.0.14206865"
     defaultConfig {
-        applicationId = "com.gridnotelabs.smude.design"
+        applicationId = "com.notavium.smude"
         minSdk = 28
         targetSdk = 35
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

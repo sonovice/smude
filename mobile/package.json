@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "test": "node --test tests/*.test.mjs",
     "tauri": "tauri",
-    "design:ios": "cd nsh && native/ios/package.sh && xcrun simctl install booted '.nsh/out/Smude UI.app' && xcrun simctl launch booted com.gridnotelabs.smude.design",
+    "design:ios": "cd nsh && native/ios/package.sh && xcrun simctl install booted '.nsh/out/Smude UI.app' && xcrun simctl launch booted com.notavium.smude",
     "design:test": "cd nsh && cargo test",
     "design:check": "cd nsh && cargo check --all-targets",
     "design:package": "cd nsh && native/ios/package.sh",

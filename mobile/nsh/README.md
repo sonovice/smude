@@ -1,6 +1,6 @@
 # Smude Mobile – Rust / Native Shell
 
-Die mobile Oberfläche steht in `src/` und ist vollständig in Rust geschrieben. NSH 0.4.0 erzeugt native UIKit-/Android-Views. Swift und Java verbinden Kamera, Medienauswahl und Teilen mit dem Betriebssystem. Die App-ID `com.gridnotelabs.smude.design` bleibt vorerst getrennt von der bisherigen App.
+Die mobile Oberfläche steht in `src/` und ist vollständig in Rust geschrieben. NSH 0.4.0 erzeugt native UIKit-/Android-Views. Swift und Java verbinden Kamera, Medienauswahl und Teilen mit dem Betriebssystem. Die App-ID `com.notavium.smude` bleibt vorerst getrennt von der bisherigen App.
 
 ## Funktionen
 

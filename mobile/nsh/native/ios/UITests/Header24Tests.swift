@@ -1,6 +1,6 @@
 import XCTest
 final class Header24Tests:XCTestCase {
- let app=XCUIApplication(bundleIdentifier:"com.gridnotelabs.smude.design")
+ let app=XCUIApplication(bundleIdentifier:"com.notavium.smude")
  func item(_ id:String)->XCUIElement{app.descendants(matching:.any).matching(identifier:id).firstMatch}
  func testTwoHeaderButtons(){
   continueAfterFailure=false;app.launchArguments=["-AppleLanguages","(de)","-AppleLocale","de_DE"];app.launch()

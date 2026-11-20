@@ -27,7 +27,7 @@ eframe = { version = "0.36.2", default-features = false, features = ["glow"] }
 
 [package.metadata.packager]
 product-name = "Smude"
-identifier = "com.gridnote-labs.smude"
+identifier = "com.notavium.smude.desktop"
 formats = ["app"]
 icons = ["assets/icon.icns", "assets/icon.png"]
 

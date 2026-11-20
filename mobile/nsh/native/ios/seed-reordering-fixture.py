@@ -14,7 +14,7 @@ import time
 import zlib
 
 simulator = sys.argv[1]
-bundle = "com.gridnotelabs.smude.design"
+bundle = "com.notavium.smude"
 subprocess.run(["xcrun", "simctl", "terminate", simulator, bundle], capture_output=True)
 container = Path(subprocess.check_output([
     "xcrun", "simctl", "get_app_container", simulator, bundle, "data"

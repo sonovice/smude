@@ -2,7 +2,7 @@ import XCTest
 
 /// Run only against the simulator fixture prepared by native/ios/ux-fixture.py.
 final class UX27Tests: XCTestCase {
- let app=XCUIApplication(bundleIdentifier:"com.gridnotelabs.smude.design")
+ let app=XCUIApplication(bundleIdentifier:"com.notavium.smude")
  func el(_ id:String)->XCUIElement{app.descendants(matching:.any).matching(identifier:id).firstMatch}
  func tap(_ id:String){XCTAssertTrue(el(id).waitForExistence(timeout:8),app.debugDescription);el(id).tap()}
  func button(_ label:String){XCTAssertTrue(app.buttons[label].waitForExistence(timeout:5),app.debugDescription);app.buttons[label].firstMatch.tap()}

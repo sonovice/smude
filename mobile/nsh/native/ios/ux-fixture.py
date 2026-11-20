@@ -9,10 +9,10 @@ import sys
 
 mode, simulator, output = sys.argv[1:]
 output=Path(output).resolve(); output.mkdir(parents=True, exist_ok=True)
-subprocess.run(['xcrun','simctl','terminate',simulator,'com.gridnotelabs.smude.design'],capture_output=True)
-container=Path(subprocess.check_output(['xcrun','simctl','get_app_container',simulator,'com.gridnotelabs.smude.design','data'],text=True).strip())
+subprocess.run(['xcrun','simctl','terminate',simulator,'com.notavium.smude'],capture_output=True)
+container=Path(subprocess.check_output(['xcrun','simctl','get_app_container',simulator,'com.notavium.smude','data'],text=True).strip())
 root=container/'Library/Application Support'
-paths=['SmudeProjects/library.json','SmudeProjects/library.previous.json','nsh/com.gridnotelabs.smude.design/storage.json']
+paths=['SmudeProjects/library.json','SmudeProjects/library.previous.json','nsh/com.notavium.smude/storage.json']
 backup=output/f'backup-{simulator}'; backup.mkdir(exist_ok=True)
 if mode=='restore':
     for i,path in enumerate(paths):

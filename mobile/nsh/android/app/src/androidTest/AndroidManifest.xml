@@ -1,3 +1,3 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-<instrumentation android:name="com.gridnotelabs.smude.design.NativeAudit26Instrumentation" android:targetPackage="com.gridnotelabs.smude.design" android:functionalTest="true" />
+<instrumentation android:name="com.notavium.smude.NativeAudit26Instrumentation" android:targetPackage="com.notavium.smude" android:functionalTest="true" />
 </manifest>

@@ -1,6 +1,6 @@
 import XCTest
 final class NativeBack25Tests:XCTestCase {
- let app=XCUIApplication(bundleIdentifier:"com.gridnotelabs.smude.design")
+ let app=XCUIApplication(bundleIdentifier:"com.notavium.smude")
  func testBackUsesTheSystemChevronWithoutCustomOverlay(){
   continueAfterFailure=false;app.launchArguments=["-AppleLanguages","(de)","-AppleLocale","de_DE"];app.launch()
   let plus=app.buttons["new-project"];XCTAssertTrue(plus.waitForExistence(timeout:15));plus.tap()

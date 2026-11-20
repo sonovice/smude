@@ -71,7 +71,7 @@ Physische Android-Kamera, vollständiges reales Buch als positiver Doppelseitenf
 
 ## Installation auf dem iPhone
 
-Der signierte Geräte-Release wurde am 8. November 2026 auf SiWa (iPhone 16 Pro) erfolgreich als `com.gridnotelabs.smude.design` installiert. Rust, native Kamera und Bundle verwenden jetzt konsistent mindestens iOS 15.1 (ONNX-Runtime-Anforderung). Der automatische Start wurde vom gesperrten Gerät abgewiesen; das ist noch kein Laufzeit-/Kameranachweis auf dem physischen Gerät. Die vorherige Smude-App blieb erhalten.
+Der signierte Geräte-Release wurde am 8. November 2026 auf SiWa (iPhone 16 Pro) erfolgreich als `com.notavium.smude` installiert. Rust, native Kamera und Bundle verwenden jetzt konsistent mindestens iOS 15.1 (ONNX-Runtime-Anforderung). Der automatische Start wurde vom gesperrten Gerät abgewiesen; das ist noch kein Laufzeit-/Kameranachweis auf dem physischen Gerät. Die vorherige Smude-App blieb erhalten.
 
 ## Neuer Funktionsbuild auf iOS
 
@@ -101,7 +101,7 @@ Root berücksichtigt die untere und seitlichen Safe Areas, die Aktionsleisten f�
 
 ## TestFlight-Erstupload
 
-Smude `0.1.0 (3)` wurde am 8. November 2026 über den persönlichen Account `waloschek@pm.me`, Team `76CP95AA8F`, erfolgreich zu App Store Connect hochgeladen. Die letzte bestätigte Servermeldung lautet „Upload succeeded“ und „Uploaded package is processing“. Der App-Eintrag wurde über Xcode als „Smude“ mit Bundle-ID `com.gridnotelabs.smude.design` angelegt. Externe Testergruppe und Beta-Freigabe sind noch nicht eingerichtet; dafür fehlt die Browser-Anmeldung.
+Smude `0.1.0 (3)` wurde am 8. November 2026 über den persönlichen Account `waloschek@pm.me`, Team `76CP95AA8F`, erfolgreich zu App Store Connect hochgeladen. Die letzte bestätigte Servermeldung lautet „Upload succeeded“ und „Uploaded package is processing“. Der App-Eintrag wurde über Xcode als „Smude“ mit Bundle-ID `com.notavium.smude` angelegt. Externe Testergruppe und Beta-Freigabe sind noch nicht eingerichtet; dafür fehlt die Browser-Anmeldung.
 
 Die native Paketierung enthält jetzt das aus der Benutzervorlage vorbereitete, opake 1024×1024-App-Icon, von actool erzeugte iPhone-/iPad-Icons und Asset-Katalog. Xcode-Plattformmetadaten, arm64-Geräteanforderung, iPad-Orientierungen und PrivacyInfo.xcprivacy sind im Paket enthalten. Der Standalone-Packager ließ zuvor Metadaten aus; die erste Servervalidierung verlangte deshalb explizit arm64. Build3 bestand diese Prüfung und wurde vollständig übertragen.
 
