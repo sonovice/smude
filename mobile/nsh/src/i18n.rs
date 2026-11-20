@@ -121,6 +121,14 @@ pub enum Key {
     Done,
     Cancel,
     Delete,
+    SendOriginalToDeveloper,
+    SendOriginalDescription,
+    Send,
+    SendingReport,
+    ReportSent,
+    PriceQuestion,
+    PriceQuestionDescription,
+    NoAnswer,
     NoPagesYet,
     TakeAPhotoOrImportImages,
     AddPages,
@@ -311,6 +319,34 @@ impl Key {
             Self::Done => ("Done", "Fertig", "Concluir"),
             Self::Cancel => ("Cancel", "Abbrechen", "Cancelar"),
             Self::Delete => ("Delete", "Löschen", "Excluir"),
+            Self::SendOriginalToDeveloper => (
+                "Send original to developer",
+                "Original an Entwickler senden",
+                "Enviar original ao desenvolvedor",
+            ),
+            Self::SendOriginalDescription => (
+                "Sends the original photo, the result, the device model, the camera's orientation at capture and the processing data. Nothing identifies you.",
+                "Gesendet werden Originalfoto, Ergebnis, Gerätemodell, Lage der Kamera beim Auslösen und die Verarbeitungsdaten. Nichts davon identifiziert dich.",
+                "São enviados a foto original, o resultado, o modelo do aparelho, a orientação da câmera na captura e os dados de processamento. Nada disso identifica você.",
+            ),
+            Self::Send => ("Send", "Senden", "Enviar"),
+            Self::SendingReport => ("Sending…", "Wird gesendet …", "Enviando…"),
+            Self::ReportSent => (
+                "Sent. Thank you!",
+                "Gesendet. Danke!",
+                "Enviado. Obrigado!",
+            ),
+            Self::PriceQuestion => (
+                "What would Smude be worth to you as a one-time purchase?",
+                "Was wäre dir Smude als Einmalkauf wert?",
+                "Quanto o Smude valeria para você como compra única?",
+            ),
+            Self::PriceQuestionDescription => (
+                "One question, asked only once in this test version.",
+                "Eine Frage, nur einmal in dieser Testversion.",
+                "Uma pergunta, feita só uma vez nesta versão de teste.",
+            ),
+            Self::NoAnswer => ("Prefer not to say", "Keine Angabe", "Prefiro não dizer"),
             Self::NoPagesYet => ("No pages yet", "Noch keine Seiten", "Nenhuma página ainda"),
             Self::TakeAPhotoOrImportImages => (
                 "Take a photo or import images.",
@@ -761,6 +797,7 @@ pub enum Failure {
     Import,
     Export,
     Retake,
+    Report,
 }
 pub fn failure(kind: Failure, diagnostic: &str) -> String {
     let row = match kind {
@@ -788,6 +825,11 @@ pub fn failure(kind: Failure, diagnostic: &str) -> String {
             "Could not process the replacement. Your previous page is preserved.",
             "Neue Aufnahme konnte nicht verarbeitet werden. Die bisherige Seite bleibt erhalten.",
             "Não foi possível processar a substituição. A página anterior foi preservada.",
+        ),
+        Failure::Report => (
+            "Could not send. Check the connection and try again.",
+            "Senden fehlgeschlagen. Verbindung prüfen und erneut versuchen.",
+            "Não foi possível enviar. Verifique a conexão e tente novamente.",
         ),
     };
     eprintln!("smude mobile: {diagnostic}");

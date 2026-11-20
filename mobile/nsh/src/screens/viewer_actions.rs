@@ -85,15 +85,32 @@ pub fn actions(
                     move || {
                         current()
                             .map(|p| {
-                                vec![
+                                let mut choices = vec![];
+                                if s.testing.is_testing() && p.source.is_some() {
+                                    choices.push(
+                                        Choice::new(
+                                            "report",
+                                            t(Key::SendOriginalToDeveloper),
+                                            "paperplane",
+                                        )
+                                        .payload(serde_json::json!(p.id)),
+                                    );
+                                }
+                                choices.push(
                                     Choice::new("delete", t(Key::DeletePage), "trash")
                                         .destructive()
                                         .payload(serde_json::json!(p.id)),
-                                ]
+                                );
+                                choices
                             })
                             .unwrap_or_default()
                     },
                     move |action, payload| {
+                        if action == "report"
+                            && let Some(page) = payload.as_u64()
+                        {
+                            s.testing.send_report(s, id, page);
+                        }
                         if action == "delete"
                             && let Some(page) = payload.as_u64()
                             && s.project(id).pages.iter().any(|p| p.id == page)

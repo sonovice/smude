@@ -1,0 +1,29 @@
+# Site des Smude-Feedback-Backends im gemeinsamen Proxy (caddy/caddy-site.sh).
+smude.notavium.de {
+	encode zstd gzip
+
+	# Uploads sind Fotos in voller Auflösung (große PNGs), PocketBase erlaubt 80 MB pro Datei.
+	request_body {
+		max_size 200MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Robots-Tag "noindex, nofollow"
+		-Server
+	}
+
+	redir /feedback /feedback/ 308
+
+	handle_path /feedback/* {
+		reverse_proxy smude-feedback:8090 {
+			# Realtime (SSE) nicht puffern.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		respond 404
+	}
+}

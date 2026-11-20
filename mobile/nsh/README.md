@@ -27,6 +27,15 @@ Die Oberfläche verwendet Englisch als Rückfall und wählt Englisch, Deutsch od
 
 „Sammlung“ ersetzt „Projekt“ in der Oberfläche. Bestehende Dateipfade und serialisierte `Project`-Felder bleiben kompatibel. Seiten- und Sammlungsraster zeigen auf Smartphones drei Spalten und auf Tablets mehr. Im Viewer liegen Drehen, Neuaufnahme und Mehr kompakt über dem Dokument; Teilen bleibt im nativen Header. Seltene Aktionen öffnen einen nativen Auswahldialog. Ergebnisse älterer Pipeline-Versionen werden nach dem Update mit erhaltenem Original und alter Vorschau neu berechnet. Frühere GCS-Seiten wechseln dabei einmalig zu Mesh.
 
+## Testversionen: Originale senden und Preisfrage
+
+Nur in Testversionen (`src/testing.rs`): Auf iOS meldet die App zur Laufzeit, ob sie aus TestFlight oder Xcode stammt (`AppTransaction`, unter iOS 15 der `sandboxReceipt`). App-Store-Builds zeigen, messen und senden nichts davon. Android kann Test-Tracks zur Laufzeit nicht unterscheiden; dort baut `android/build-testing.sh` mit `SMUDE_TESTING=1`. Die Variable erzwingt den Testmodus auch für eigene Entwicklungs-Builds auf iOS.
+
+- Im Viewer bietet „Mehr“ dann „Original an Entwickler senden“. Nach Zustimmung gehen Originalfoto, Ergebnis (falls vorhanden), Seitendaten (Status, Fehler, Drehungen, Layout, Schärfebänder, Position), App-Version/Build, Gerätemodell, OS und Sprache an die Collection `reports`.
+- Die Kamera legt beim Auslösen neben jedes JPEG eine Datei `<aufnahme>.jpg.json`: Lage (Schwerkraft, Lagewinkel, Drehrate aus CoreMotion), Geräte-/Interface-Orientierung, Aufnahmewinkel, erkannte Seiten und Kontur sowie Objektiv, Zoom, ISO und Belichtung. Sie wandert beim Import mit dem Original mit. EXIF bleibt unverändert im JPEG. Android und importierte Fotos haben keine Sidecar-Datei.
+- Nach fünf Minuten aktiver Nutzung (summiert über Starts) fragt die App einmalig an einer ruhigen Stelle (Sammlungsliste oder Sammlung, nichts geöffnet), was Smude als Einmalkauf wert wäre: 0, 5, 10, 15, 20 oder 25 €, oder „Keine Angabe“. Die Antwort geht an `price_votes` und wird bis zur Bestätigung des Servers lokal aufbewahrt und beim nächsten Start erneut gesendet.
+- Gezählt wird mit einer zufälligen Installations-ID, die nicht vom Gerät abgeleitet ist. Das Backend (PocketBase hinter Caddy, Docker Compose) liegt reproduzierbar unter [feedback-backend/](feedback-backend/README.md).
+
 ## Bauen und prüfen
 
 [NSH 0.4.0 installieren](https://nsh.dev/docs/installation/), dann in diesem Verzeichnis:
@@ -37,6 +46,7 @@ cargo check --all-targets
 native/ios/package.sh              # Simulator
 native/ios/package.sh ios          # Gerätepaket; anschließend signieren
 android/build.sh                   # Android mit CameraX/native Services
+android/build-testing.sh           # dasselbe als Testversion (SMUDE_TESTING=1)
 ```
 
 Der Android-Host ist erforderlich: NSH 0.4.0 bindet eigene Java-Komponenten nicht über seinen Standard-Packager ein. Details in [android/README.md](android/README.md). macOS eignet sich zur UI-Entwicklung; die nativen mobilen Import-/Share-Services sind dort nicht registriert.

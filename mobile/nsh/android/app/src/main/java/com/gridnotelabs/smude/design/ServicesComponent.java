@@ -61,7 +61,7 @@ final class ServicesComponent implements NshComponent {
         main.post(() -> {
             if (destroyed) return;
             if (!root.isDirectory() && !root.mkdirs()) emit("ready",Map.of("error",Localizer.text(view.getContext(),"Could not open collection storage")));
-            else { localization(); emit("ready",Map.of("root",root.getAbsolutePath())); }
+            else { localization(); emit("ready",Map.of("root",root.getAbsolutePath())); environment(); }
         });
     }
     @Override public View view() { return view; }
@@ -79,6 +79,22 @@ final class ServicesComponent implements NshComponent {
             case "share" -> share(id,args);
             default -> { }
         }
+    }
+    /** Build and device facts. Android cannot tell test tracks apart at runtime:
+     *  test builds are made with SMUDE_TESTING=1, which Rust reads at compile time. */
+    private void environment() {
+        String version="", build="";
+        try {
+            android.content.pm.PackageInfo info=activity.getPackageManager().getPackageInfo(activity.getPackageName(),0);
+            version=info.versionName==null?"":info.versionName;
+            build=Long.toString(info.getLongVersionCode());
+        } catch (Exception ignored) { }
+        android.util.DisplayMetrics metrics=activity.getResources().getDisplayMetrics();
+        emit("environment",Map.of(
+            "testing",false,
+            "app",Map.of("version",version,"build",build,"bundle",activity.getPackageName()),
+            "device",Map.of("model",Build.MODEL,"manufacturer",Build.MANUFACTURER,"system","Android",
+                "system_version",Build.VERSION.RELEASE,"screen",List.of(metrics.widthPixels,metrics.heightPixels,metrics.density))));
     }
     private void localization() {
         android.os.LocaleList preferences=activity.getResources().getConfiguration().getLocales();

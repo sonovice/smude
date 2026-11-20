@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Test builds only send feedback (SMUDE_TESTING=1); release builds make no requests. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <application android:label="@string/app_name" android:localeConfig="@xml/locales_config" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@style/SmudeTheme"
         android:allowBackup="false" android:enableOnBackInvokedCallback="true">

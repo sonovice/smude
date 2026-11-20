@@ -1,0 +1,25 @@
+# Gemeinsamer Reverse Proxy des Servers, unter /opt/caddy. Er gehört keinem
+# Projekt: Jedes Projekt bringt dieses Kit mit (caddy-site.sh legt den Proxy an,
+# falls er fehlt) und hängt nur seine eigene Site unter sites/<projekt>.caddy ein.
+# Projekte erreichen ihn über das externe Docker-Netz `caddy`.
+name: caddy
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./sites:/etc/caddy/sites:ro
+      - ./data:/data
+      - ./config:/config
+    networks: [caddy]
+
+networks:
+  caddy:
+    name: caddy
+    external: true

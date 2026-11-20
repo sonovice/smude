@@ -1,0 +1,2 @@
+# Jedes Projekt verwaltet genau eine Datei sites/<projekt>.caddy (caddy-site.sh).
+import /etc/caddy/sites/*.caddy

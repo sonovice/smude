@@ -3,6 +3,7 @@ import UIKit
 private func SmudeL(_ key: String) -> String { NSLocalizedString(key, comment: "") }
 import AVFoundation
 import CoreImage
+import CoreMotion
 
 @_silgen_name("smude_detect_bgra")
 private func detectPage(_ bytes: UnsafePointer<UInt8>, _ length: UInt, _ width: UInt, _ height: UInt, _ stride: UInt, _ clockwiseTurns: UInt32) -> UnsafeMutablePointer<CChar>?
@@ -132,6 +133,8 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
     private struct PendingPhoto {
         let request: UInt64
         let path: String
+        /// What was measured at the shutter; stored next to the JPEG.
+        var context: [String: Any]
         var writing = false
         var stored = false
         var sensorFinished = false
@@ -147,6 +150,8 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
     private var orientation: UIInterfaceOrientation = .unknown
     private var frameOrientation = CameraOrientation()
     private var inferredTurns: UInt32?
+    /// Pulled at the shutter only; diagnostic context, not a capture input.
+    private let motion = CMMotionManager()
 
     init(userdata: UnsafeMutableRawPointer?, callback: @escaping Event) {
         self.userdata = userdata; self.callback = callback
@@ -217,6 +222,10 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
     private func start() {
+        if motion.isDeviceMotionAvailable && !motion.isDeviceMotionActive {
+            motion.deviceMotionUpdateInterval = 0.1
+            motion.startDeviceMotionUpdates()
+        }
         queue.async { [weak self] in
             guard let self else { return }
             if !self.configured {
@@ -258,6 +267,7 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
     private func pause() {
+        motion.stopDeviceMotionUpdates()
         inferredTurns = nil
         invalidate(SmudeL("Camera paused"))
         let stopSession = pending.isEmpty
@@ -273,6 +283,7 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
         expiry?.invalidate(); expiry = nil
         observers.forEach(NotificationCenter.default.removeObserver); observers = []
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        motion.stopDeviceMotionUpdates()
         let stopSession = pending.isEmpty
         let stopTorch = !capturing
         queue.async { [self] in
@@ -321,7 +332,7 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
             if #available(iOS 16.0, *) { settings.maxPhotoDimensions = photos.maxPhotoDimensions }
             else { settings.isHighResolutionPhotoEnabled = true }
             let unique = settings.uniqueID
-            pending[unique] = PendingPhoto(request:request,path:path)
+            pending[unique] = PendingPhoto(request:request,path:path,context:shutterContext(plan))
             Self.owners[unique] = self; acquiring = unique; capturing = true
             let info:[String:Any] = ["event":"capture_started","request_id":request,"pages":detectedPages,"rotation":plan.rotation,"preview_frame":lastGoodStatus?["preview_frame"] ?? NSNull()]
             publishCapture(info);emit(info)
@@ -330,7 +341,14 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
             queue.async { [self] in
                 let orientation = [90:UIInterfaceOrientation.portrait,270:.portraitUpsideDown,0:.landscapeRight,180:.landscapeLeft][plan.angle] ?? .portrait
                 setOrientation(photos.connection(with:.video),angle:CGFloat(plan.angle),current:orientation)
+                let lens = cameraDevice.map { device -> [String: Any] in
+                    ["type": device.deviceType.rawValue, "zoom": device.videoZoomFactor,
+                     "lens_position": device.lensPosition, "torch": device.isTorchActive,
+                     "exposure_duration": device.exposureDuration.seconds, "iso": device.iso,
+                     "focus_mode": device.focusMode.rawValue, "exposure_mode": device.exposureMode.rawValue]
+                }
                 photos.capturePhoto(with:settings,delegate:self)
+                if let lens { DispatchQueue.main.async { [self] in pending[unique]?.context["camera"] = lens } }
             }
         default: break
         }
@@ -397,6 +415,31 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
         lastGoodStatus = ready ? status : nil
         emit(status)
     }
+    /// Pose and detection at the shutter. EXIF in the JPEG already carries the
+    /// sensor's ISO, exposure, focal length and lens; this adds what it lacks.
+    private func shutterContext(_ plan: (angle: Int, rotation: Int)) -> [String: Any] {
+        var context: [String: Any] = [
+            "schema": 1,
+            "captured_at": Date().timeIntervalSince1970,
+            "device_orientation": UIDevice.current.orientation.rawValue,
+            "interface_orientation": orientation.rawValue,
+            "capture_angle": plan.angle,
+            "input_rotation": plan.rotation,
+            "inferred_turns": inferredTurns.map { Int($0) } ?? NSNull(),
+            "detected_pages": detectedPages,
+        ]
+        if var detection = lastGoodStatus {
+            detection.removeValue(forKey: "event")
+            if JSONSerialization.isValidJSONObject(detection) { context["detection"] = detection }
+        }
+        if let sample = motion.deviceMotion {
+            context["gravity"] = [sample.gravity.x, sample.gravity.y, sample.gravity.z]
+            context["attitude"] = ["roll": sample.attitude.roll, "pitch": sample.attitude.pitch, "yaw": sample.attitude.yaw]
+            context["rotation_rate"] = [sample.rotationRate.x, sample.rotationRate.y, sample.rotationRate.z]
+            context["user_acceleration"] = [sample.userAcceleration.x, sample.userAcceleration.y, sample.userAcceleration.z]
+        }
+        return context
+    }
     private func publishCapture(_ info:[String:Any]) {
         NotificationCenter.default.post(name:Notification.Name("smude.capture"),object:nil,userInfo:info)
     }
@@ -425,6 +468,9 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
         DispatchQueue.main.async { [self] in
             guard var ticket=pending[unique],!ticket.writing,!ticket.stored else{return}
             ticket.writing=true;pending[unique]=ticket
+            var context=ticket.context
+            let dimensions=photo.resolvedSettings.photoDimensions
+            context["photo_dimensions"]=[dimensions.width,dimensions.height]
             releaseShutter(unique)
             Self.saves.async { [self] in
                 var success=false
@@ -432,6 +478,10 @@ private final class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDele
                     do {
                         let file=URL(fileURLWithPath:ticket.path)
                         try FileManager.default.createDirectory(at:file.deletingLastPathComponent(),withIntermediateDirectories:true)
+                        // Before the JPEG: Rust imports as soon as the JPEG exists.
+                        if let meta=try? JSONSerialization.data(withJSONObject:context) {
+                            try? meta.write(to:URL(fileURLWithPath:ticket.path+".json"),options:.atomic)
+                        }
                         // Preserve full sensor JPEG and EXIF. Rust applies orientation
                         // during its existing final processing, without a camera re-encode.
                         try data.write(to:file,options:.atomic);success=true

@@ -30,6 +30,12 @@ pub struct Job {
     pub project: u64,
     pub page: Page,
 }
+/// Where the camera stores what it measured at the shutter for `image`.
+pub fn sidecar(image: &Path) -> PathBuf {
+    let mut path = image.as_os_str().to_owned();
+    path.push(".json");
+    PathBuf::from(path)
+}
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -166,7 +172,12 @@ impl Repository {
             .map_err(err)?
             .sync_all()
             .map_err(err)?;
-        fs::rename(temp, finalpath).map_err(err)?;
+        fs::rename(temp, &finalpath).map_err(err)?;
+        // Capture context the camera measured at the shutter travels with
+        // the original. It is diagnostic only, so a failed copy is ignored.
+        if let Ok(meta) = fs::read(sidecar(source)) {
+            let _ = atomic(&sidecar(&finalpath), &meta);
+        }
         Ok(relative)
     }
     pub fn process(&self, job: &Job) -> Result<RenderBatch, String> {

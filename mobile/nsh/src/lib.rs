@@ -10,6 +10,7 @@ pub mod repository;
 mod screens;
 mod services;
 mod state;
+mod testing;
 mod ui;
 use nsh_base::nav_stack;
 use nsh_core::prelude::*;
@@ -33,6 +34,7 @@ pub fn App() -> impl IntoElement {
         }
     });
     state.start_worker();
+    state.testing.start(state);
     let feedback = feedback::Feedback::new(state);
     view()
         .relative()

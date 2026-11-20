@@ -47,6 +47,7 @@ pub struct State {
     pub export_preview: Signal<Option<String>>,
     pub share_request: Signal<Option<sharing::Request>>,
     pub share_ready: Signal<Option<sharing::Prepared>>,
+    pub testing: crate::testing::Testing,
 }
 impl State {
     pub fn new() -> Self {
@@ -76,6 +77,7 @@ impl State {
             export_preview: signal(None),
             share_request: signal(None),
             share_ready: signal(None),
+            testing: crate::testing::Testing::new(),
         }
     }
     pub fn push(self, r: Route) {
@@ -263,6 +265,9 @@ impl State {
         );
     }
     pub fn service_event(self, e: &NativeEvent) {
+        if self.testing.event(e) {
+            return;
+        }
         match &*e.name {
             "localization" => {
                 if let Some(tag) = e.data["language"].as_str() {

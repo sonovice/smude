@@ -1,0 +1,29 @@
+name: smude-feedback
+
+services:
+  pocketbase:
+    build: .
+    image: smude-feedback-pocketbase:0.40.6
+    container_name: smude-feedback
+    restart: unless-stopped
+    # Nur lokal auf dem Host (Debugging, Export). Öffentlich nur über Caddy.
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - ./pb_data:/pb/pb_data
+      - ./pb_migrations:/pb/pb_migrations
+    networks:
+      default:
+      # Netz des gemeinsamen Caddy (caddy/), der smude-feedback:8090 erreicht.
+      caddy:
+        aliases: [smude-feedback]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  caddy:
+    name: caddy
+    external: true

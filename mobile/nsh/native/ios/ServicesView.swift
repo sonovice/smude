@@ -3,6 +3,7 @@ import UIKit
 import PhotosUI
 import ImageIO
 import UniformTypeIdentifiers
+import StoreKit
 
 func SmudeL(_ key: String) -> String { NSLocalizedString(key, comment: "") }
 
@@ -83,6 +84,7 @@ private final class ServicesView: UIView, PHPickerViewControllerDelegate,
             readySent = true
             localization()
             emit(["event":"ready", "root":root!.path])
+            sendEnvironment()
         } catch { emit(["event":"ready", "error":SmudeL("Could not open collection storage") + ": \(error.localizedDescription)"]) }
     }
 
@@ -165,6 +167,27 @@ private final class ServicesView: UIView, PHPickerViewControllerDelegate,
             } catch { emit(["event":"shared", "request_id":requestID, "error":error.localizedDescription]) }
         default:
             emit(["event":event, "request_id":requestID, "error":"Unbekannte Medienaktion."])
+        }
+    }
+
+    /// Build and device facts, and whether this is a test distribution.
+    /// Rust decides what test builds show; App Store builds report false.
+    private func sendEnvironment() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let screen = UIScreen.main
+        let app: [String: Any] = [
+            "version": info["CFBundleShortVersionString"] as? String ?? "",
+            "build": info["CFBundleVersion"] as? String ?? "",
+            "bundle": Bundle.main.bundleIdentifier ?? "",
+        ]
+        let device: [String: Any] = [
+            "model": deviceModel(),
+            "system": UIDevice.current.systemName,
+            "system_version": UIDevice.current.systemVersion,
+            "screen": [screen.nativeBounds.width, screen.nativeBounds.height, screen.nativeScale],
+        ]
+        testDistribution { [weak self] testing in
+            self?.emit(["event":"environment", "testing":testing, "app":app, "device":device])
         }
     }
 
@@ -321,6 +344,33 @@ private final class ServicesView: UIView, PHPickerViewControllerDelegate,
               "action_ms":6000,
               "persistent_action":UIAccessibility.isVoiceOverRunning || UIAccessibility.isSwitchControlRunning,
               "foreground":UIApplication.shared.applicationState == .active])
+    }
+}
+
+/// TestFlight and Xcode builds; never the App Store. StoreKit 2 knows the
+/// distribution on iOS 16+. iOS 15 has only the receipt's file name.
+private func testDistribution(_ done: @escaping (Bool) -> Void) {
+    let sandboxReceipt = Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
+    guard #available(iOS 16.0, *) else { done(sandboxReceipt); return }
+    Task {
+        let testing: Bool
+        switch try? await AppTransaction.shared {
+        case .verified(let transaction)?, .unverified(let transaction, _)?:
+            testing = transaction.environment != .production
+        case nil:
+            testing = sandboxReceipt
+        }
+        await MainActor.run { done(testing) }
+    }
+}
+
+/// The hardware identifier (`iPhone16,1`); the simulator reports the one it emulates.
+private func deviceModel() -> String {
+    if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] { return simulated }
+    var system = utsname()
+    uname(&system)
+    return withUnsafeBytes(of: &system.machine) { raw in
+        String(decoding: raw.prefix(while: { $0 != 0 }), as: UTF8.self)
     }
 }
 
