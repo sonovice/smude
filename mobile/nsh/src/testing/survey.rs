@@ -118,7 +118,9 @@ impl Survey {
         for price in PRICES {
             dialog = dialog.action(format!("p{price}"), price_label(price, language));
         }
-        let shown = dialog.cancel("skip", t(Key::NoAnswer)).show();
+        // A regular action: iOS hides an action sheet's cancel button on
+        // phones, and declining must stay as visible as every price.
+        let shown = dialog.action("skip", t(Key::NoAnswer)).show();
         spawn(async move {
             let answer = shown.await;
             self.showing.with(|s| *s = false);
